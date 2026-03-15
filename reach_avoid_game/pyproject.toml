@@ -1,0 +1,24 @@
+# Active HJ solver library: hj-reachability==0.7.0 (OptimizedDP not used)
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reach-avoid-game"
+version = "0.1.0"
+description = "Reach-Avoid Differential Game with HJ Reachability Analysis"
+requires-python = ">=3.10"
+dependencies = [
+    "jax[cpu]",
+    "hj-reachability==0.7.0",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
