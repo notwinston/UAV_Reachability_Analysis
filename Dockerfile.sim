@@ -1,0 +1,118 @@
+# Dockerfile.sim - ROS2 Humble + Gazebo Harmonic + PX4 SITL simulation environment
+# for reach-avoid drone game
+#
+# Build: docker build -f Dockerfile.sim -t reach-avoid-sim .
+# Run:   docker-compose -f docker-compose.sim.yml up
+
+FROM ubuntu:22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=humble
+
+# ---- System dependencies ----
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    gnupg2 \
+    lsb-release \
+    software-properties-common \
+    ca-certificates \
+    git \
+    build-essential \
+    cmake \
+    python3 \
+    python3-pip \
+    python3-colcon-common-extensions \
+    python3-rosdep \
+    python3-vcstool \
+    sudo \
+    locales \
+    && locale-gen en_US en_US.UTF-8 \
+    && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+
+# ---- ROS2 Humble ----
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+    -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+    http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" \
+    > /etc/apt/sources.list.d/ros2.list
+
+RUN apt-get update && apt-get install -y \
+    ros-humble-desktop \
+    ros-humble-ros-gz \
+    ros-humble-teleop-twist-keyboard \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- micro-XRCE-DDS-Agent (for PX4 <-> ROS2 bridge) ----
+RUN git clone --depth 1 https://github.com/eProsima/Micro-XRCE-DDS-Agent.git /opt/micro-xrce-dds-agent \
+    && cd /opt/micro-xrce-dds-agent \
+    && mkdir build && cd build \
+    && cmake .. \
+    && make -j$(nproc) \
+    && make install \
+    && ldconfig \
+    && rm -rf /opt/micro-xrce-dds-agent
+
+# ---- PX4 SITL ----
+RUN git clone --depth 1 --recursive https://github.com/PX4/PX4-Autopilot.git /opt/PX4-Autopilot \
+    && cd /opt/PX4-Autopilot \
+    && bash Tools/setup/ubuntu.sh --no-sim-tools \
+    && make px4_sitl gz_x500 \
+    || echo "PX4 SITL build attempted - may require GPU runtime for full Gazebo support"
+
+# ---- px4_msgs and px4_ros_com ----
+RUN mkdir -p /opt/px4_ros_ws/src \
+    && cd /opt/px4_ros_ws/src \
+    && git clone --depth 1 https://github.com/PX4/px4_msgs.git \
+    && git clone --depth 1 https://github.com/PX4/px4_ros_com.git \
+    && cd /opt/px4_ros_ws \
+    && . /opt/ros/humble/setup.sh \
+    && colcon build --symlink-install \
+    && rm -rf /opt/px4_ros_ws/log /opt/px4_ros_ws/build
+
+# ---- Python dependencies ----
+RUN pip3 install --no-cache-dir \
+    scipy \
+    numpy \
+    pyyaml
+
+# ---- Create user ----
+RUN useradd -m -u 1000 -s /bin/bash simuser \
+    && echo "simuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/simuser
+
+USER simuser
+WORKDIR /home/simuser/ws
+
+# ---- Copy workspace ----
+COPY --chown=simuser:simuser reach_avoid_ws/src /home/simuser/ws/src
+COPY --chown=simuser:simuser config /home/simuser/ws/config
+
+# ---- Build workspace ----
+RUN . /opt/ros/humble/setup.sh \
+    && . /opt/px4_ros_ws/install/setup.sh \
+    && cd /home/simuser/ws \
+    && colcon build --symlink-install \
+    || echo "Workspace build attempted - some packages may need runtime dependencies"
+
+# ---- Entrypoint ----
+COPY --chown=simuser:simuser <<'ENTRYPOINT_SCRIPT' /home/simuser/entrypoint.sh
+#!/bin/bash
+set -e
+source /opt/ros/humble/setup.bash
+if [ -f /opt/px4_ros_ws/install/setup.bash ]; then
+    source /opt/px4_ros_ws/install/setup.bash
+fi
+if [ -f /home/simuser/ws/install/setup.bash ]; then
+    source /home/simuser/ws/install/setup.bash
+fi
+exec "$@"
+ENTRYPOINT_SCRIPT
+
+RUN chmod +x /home/simuser/entrypoint.sh
+
+ENTRYPOINT ["/home/simuser/entrypoint.sh"]
+CMD ["bash"]

@@ -1,0 +1,41 @@
+# docker-compose.sim.yml - Simulation environment for reach-avoid drone game
+#
+# Usage:
+#   xhost +local:docker   # Allow X11 forwarding
+#   docker-compose -f docker-compose.sim.yml up
+#
+# Prerequisites:
+#   - NVIDIA GPU with nvidia-container-toolkit installed
+#   - X11 display server running on host
+
+services:
+  reach-avoid-sim:
+    build:
+      context: .
+      dockerfile: Dockerfile.sim
+    image: reach-avoid-sim:latest
+    container_name: reach-avoid-sim
+    runtime: nvidia
+    network_mode: host
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - ROS_DOMAIN_ID=0
+      - PX4_SIM_MODEL=gz_x500
+      - PX4_GZ_WORLD=reach_avoid_arena
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ./data/value_functions:/home/simuser/ws/data/value_functions:ro
+      - ./config:/home/simuser/ws/config:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stdin_open: true
+    tty: true
+    command: bash
