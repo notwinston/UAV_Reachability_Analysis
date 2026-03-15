@@ -52,8 +52,8 @@ grid:
 grid_presets:
   dev:
     vertical:
-      z_rel_points: 24
-      v_dz_points: 10
+      z_rel_points: 51
+      v_dz_points: 31
     vertical_3d:
       z_d_points: 24
       v_dz_points: 10

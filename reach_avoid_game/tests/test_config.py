@@ -32,7 +32,7 @@ def test_config_obstacles():
 def test_config_grid():
     config = GameConfig.from_yaml(str(YAML_PATH))
     # Dev preset should override vertical grid points
-    assert config.grid.vertical.z_rel_points == 24
+    assert config.grid.vertical.z_rel_points == 51
     assert config.grid.solver.time_horizon == 15.0
 
 
