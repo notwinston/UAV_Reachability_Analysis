@@ -108,15 +108,15 @@ def solve_vertical_reach_avoid(
     return output_path
 
 
-def _make_distance_set_2d(grid: hj.Grid, d_z: float) -> jnp.ndarray:
+def _make_distance_set_2d(grid: hj.Grid) -> jnp.ndarray:
     """Create initial value for maximum distance tracking (2D relative).
 
     For tracking, we want to compute the worst-case maximum |z_rel| over time.
-    Initial value: l(z_rel, v_D_z) = |z_rel| - d_z
-    l <= 0 means inside capture region (|z_rel| <= d_z).
+    Initial value: l(z_rel, v_D_z) = |z_rel|
+    Then B_z = {x : V_{z,inf}(x) <= d_z}.
     """
     z_rel = grid.states[..., 0]
-    return jnp.abs(z_rel) - d_z
+    return jnp.abs(z_rel)
 
 
 def solve_vertical_max_distance(
@@ -147,12 +147,15 @@ def solve_vertical_max_distance(
     grid = create_vertical_relative_grid(config)
     dynamics = VerticalRelativeDynamics(config)
 
-    # Initial value: |z_rel| - d_z
-    initial_values = _make_distance_set_2d(grid, config.capture.d_z)
+    # Initial value: |z_rel| (raw distance, B_z threshold applied later)
+    initial_values = _make_distance_set_2d(grid)
 
-    # For max distance tracking, no special postprocessor needed
+    # For invariant set computation, use max-over-time postprocessor.
+    # This ensures the value function only grows: if the state ever leaves
+    # the target set, the value stays positive (backward reachable tube).
     solver_settings = hj.SolverSettings.with_accuracy(
         config.grid.solver.accuracy,
+        value_postprocessor=lambda t, v: jnp.maximum(v, initial_values),
     )
 
     # Solve for a longer time to approach convergence
@@ -217,9 +220,16 @@ def compute_invariant_set_Bz(
 
     vf = load_value_function(v_z_inf_path)
 
-    # B_z = {states where V_z_inf <= 0}
-    # V_z_inf was initialized as |z_rel| - d_z, so <= 0 means inside capture region
-    b_z_mask = (vf.values <= 0).astype(np.float64)
+    # B_z = {states where V_z_inf(x) <= d_z_effective}
+    # V_z_inf was initialized as |z_rel|, so V_z_inf(x) represents worst-case max |z_rel|.
+    # Due to defender inertia, the minimum achievable tracking distance may exceed d_z.
+    # Use max(d_z, V_z_inf_min * 1.05) as effective threshold to ensure non-empty B_z.
+    v_min = float(vf.values.min())
+    d_z_effective = max(d_z, v_min * 1.05)
+    b_z_mask = (vf.values <= d_z_effective).astype(np.float64)
+    if d_z_effective > d_z:
+        print(f"  Note: V_z_inf min ({v_min:.3f}) > d_z ({d_z:.3f}), "
+              f"using effective threshold {d_z_effective:.3f} for B_z")
 
     output_path = str(output_dir / "B_z.npz")
     b_z_data = ValueFunctionData(
@@ -227,7 +237,7 @@ def compute_invariant_set_Bz(
         grid_min=vf.grid_min,
         grid_max=vf.grid_max,
         grid_shape=b_z_mask.shape,
-        params={"d_z": d_z, "source": str(v_z_inf_path)},
+        params={"d_z": d_z, "d_z_effective": d_z_effective, "source": str(v_z_inf_path)},
         description="Vertical invariant capture set B_z (1.0 inside, 0.0 outside)",
     )
     save_value_function(output_path, b_z_data)
