@@ -1,0 +1,214 @@
+<?xml version="1.0" ?>
+<!--
+  Reach-Avoid Arena World for Gazebo Harmonic
+  Room: 8m x 8m x 4m (from game_params.yaml)
+  Obstacle: box at x=[3,4], y=[2,6], z=[0,4]
+  Target region: green transparent box at x=[6,8], y=[3,5]
+-->
+<sdf version="1.9">
+  <world name="reach_avoid_arena">
+
+    <!-- Physics configuration -->
+    <physics name="1kHz" type="dart">
+      <max_step_size>0.001</max_step_size>
+      <real_time_update_rate>1000</real_time_update_rate>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- Sun light -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>4 4 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Ground plane -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>20 20</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>20 20</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.5 0.5 0.5 1</ambient>
+            <diffuse>0.5 0.5 0.5 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Wall: South (y=0), along x-axis -->
+    <model name="wall_south">
+      <static>true</static>
+      <pose>4 0 2 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>8 0.1 4</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>8 0.1 4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.7 0.7 0.7 1</ambient>
+            <diffuse>0.7 0.7 0.7 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Wall: North (y=8), along x-axis -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>4 8 2 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>8 0.1 4</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>8 0.1 4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.7 0.7 0.7 1</ambient>
+            <diffuse>0.7 0.7 0.7 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Wall: West (x=0), along y-axis -->
+    <model name="wall_west">
+      <static>true</static>
+      <pose>0 4 2 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>0.1 8 4</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>0.1 8 4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.7 0.7 0.7 1</ambient>
+            <diffuse>0.7 0.7 0.7 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Wall: East (x=8), along y-axis -->
+    <model name="wall_east">
+      <static>true</static>
+      <pose>8 4 2 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>0.1 8 4</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>0.1 8 4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.7 0.7 0.7 1</ambient>
+            <diffuse>0.7 0.7 0.7 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!--
+      Obstacle: box from game_params.yaml
+      x_min=3, x_max=4, y_min=2, y_max=6, z_min=0, z_max=4
+      Center: (3.5, 4.0, 2.0), Size: (1.0, 4.0, 4.0)
+    -->
+    <model name="obstacle_1">
+      <static>true</static>
+      <pose>3.5 4.0 2.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>1.0 4.0 4.0</size></box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>1.0 4.0 4.0</size></box>
+          </geometry>
+          <material>
+            <ambient>0.8 0.2 0.2 1</ambient>
+            <diffuse>0.8 0.2 0.2 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!--
+      Target region visual marker (green transparent)
+      x_min=6, x_max=8, y_min=3, y_max=5
+      Center: (7.0, 4.0, 0.05), Size: (2.0, 2.0, 0.1) - flat marker on ground
+      Also a tall transparent volume for visibility
+    -->
+    <model name="target_region_ground">
+      <static>true</static>
+      <pose>7.0 4.0 0.01 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box><size>2.0 2.0 0.02</size></box>
+          </geometry>
+          <material>
+            <ambient>0.0 0.8 0.0 0.5</ambient>
+            <diffuse>0.0 0.8 0.0 0.5</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="target_region_volume">
+      <static>true</static>
+      <pose>7.0 4.0 2.0 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box><size>2.0 2.0 4.0</size></box>
+          </geometry>
+          <material>
+            <ambient>0.0 0.8 0.0 0.15</ambient>
+            <diffuse>0.0 0.8 0.0 0.15</diffuse>
+          </material>
+          <transparency>0.85</transparency>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
