@@ -1,0 +1,51 @@
+# Simulation parameters for reach-avoid drone game
+# These configure topic names, frame IDs, and PX4 instance settings.
+
+# Topic names
+topics:
+  defender_state: /defender/state
+  defender_velocity: /defender/velocity
+  defender_cmd_vel: /defender/cmd_vel
+  attacker_state: /attacker/state
+  attacker_velocity: /attacker/velocity
+  attacker_cmd_vel: /attacker/cmd_vel
+  attacker_teleop: /attacker/teleop
+
+# Frame IDs
+frames:
+  world: world
+  defender_body: defender_base_link
+  attacker_body: attacker_base_link
+
+# PX4 instance configuration
+px4:
+  defender:
+    vehicle_id: 1
+    mavlink_udp_port: 14540
+    model: gz_x500
+  attacker:
+    vehicle_id: 2
+    mavlink_udp_port: 14541
+    model: gz_x500
+
+# Gazebo model names
+gazebo:
+  defender_model: x500_defender
+  attacker_model: x500_attacker
+  world_name: reach_avoid_arena
+
+# Control rates (Hz)
+rates:
+  px4_heartbeat: 20.0
+  ground_truth_publish: 50.0
+  attacker_control: 20.0
+  defender_control: 20.0
+
+# Default attacker waypoints [x, y, z] - navigate to target center
+attacker_waypoints:
+  - [1.0, 4.0, 2.0]   # Starting area
+  - [2.5, 4.0, 2.0]   # Approach obstacle
+  - [2.5, 1.0, 2.0]   # Go around obstacle (below)
+  - [5.0, 1.0, 2.0]   # Past obstacle
+  - [5.0, 4.0, 2.0]   # Approach target
+  - [7.0, 4.0, 2.0]   # Target center
