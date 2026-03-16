@@ -8,6 +8,7 @@ from reach_avoid_game.solvers.value_function_io import load_value_function, Valu
 from reach_avoid_game.solvers.winning_conditions import (
     compute_T_goal,
     compute_T_capture,
+    compute_T_capture_from_slices,
     check_defender_wins,
     get_winning_regions,
 )
@@ -86,6 +87,46 @@ class TestTCapture:
         # Both may be inf on coarse grid; that's OK
         if t_close < float("inf") and t_far < float("inf"):
             assert t_close <= t_far + 1.0
+
+
+class TestTCaptureFromSlices:
+    def test_T_capture_from_slices_returns_float(self, phi_z):
+        """compute_T_capture_from_slices should return a float."""
+        state = np.array([10.0, 0.0, 10.0])
+        tc = compute_T_capture_from_slices(
+            "/workspace/data/value_functions/phi_z_time_slices.npz",
+            state, phi_z.grid_min, phi_z.grid_max, phi_z.grid_shape,
+        )
+        assert isinstance(tc, float)
+        assert tc >= 0.0
+
+    def test_T_capture_from_slices_monotonic(self, phi_z):
+        """Closer states should have T_capture <= farther states (or both inf)."""
+        state_close = np.array([10.0, 0.0, 10.5])
+        state_far = np.array([2.0, 0.0, 18.0])
+
+        tc_close = compute_T_capture_from_slices(
+            "/workspace/data/value_functions/phi_z_time_slices.npz",
+            state_close, phi_z.grid_min, phi_z.grid_max, phi_z.grid_shape,
+        )
+        tc_far = compute_T_capture_from_slices(
+            "/workspace/data/value_functions/phi_z_time_slices.npz",
+            state_far, phi_z.grid_min, phi_z.grid_max, phi_z.grid_shape,
+        )
+        # On dev grid both may be inf (B_z target too small)
+        # But if both finite, closer should be smaller
+        if tc_close < float("inf") and tc_far < float("inf"):
+            assert tc_close <= tc_far + 0.5
+
+    def test_T_capture_from_slices_inf_for_unreachable(self, phi_z):
+        """States far apart with bad velocity should return inf T_capture."""
+        # State far outside any capture possibility
+        state = np.array([0.5, -4.0, 19.5])  # z_D near floor, z_A near ceiling, moving away
+        tc = compute_T_capture_from_slices(
+            "/workspace/data/value_functions/phi_z_time_slices.npz",
+            state, phi_z.grid_min, phi_z.grid_max, phi_z.grid_shape,
+        )
+        assert tc == float("inf")
 
 
 class TestCheckDefenderWins:

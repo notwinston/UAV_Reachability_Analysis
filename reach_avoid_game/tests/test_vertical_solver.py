@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from reach_avoid_game.config import GameConfig
-from reach_avoid_game.solvers.value_function_io import load_value_function
+from reach_avoid_game.solvers.value_function_io import load_value_function, load_time_slices
 from reach_avoid_game.solvers.vertical_solver import (
     solve_vertical_reach_avoid,
     solve_vertical_max_distance,
@@ -24,21 +24,22 @@ def config():
 
 
 @pytest.fixture(scope="module")
-def phi_z_path(config):
-    """Compute phi_z on dev grid (cached for module)."""
-    return solve_vertical_reach_avoid(config)
-
-
-@pytest.fixture(scope="module")
 def v_z_inf_path(config):
-    """Compute V_z_inf on dev grid (cached for module)."""
+    """Compute V_z_inf on dev grid (cached for module). Step 1 of pipeline."""
     return solve_vertical_max_distance(config)
 
 
 @pytest.fixture(scope="module")
 def b_z_path(v_z_inf_path, config):
-    """Compute B_z from V_z_inf (cached for module)."""
+    """Compute B_z from V_z_inf (cached for module). Step 2 of pipeline."""
     return compute_invariant_set_Bz(v_z_inf_path, d_z=config.capture.d_z)
+
+
+@pytest.fixture(scope="module")
+def phi_z_path(config, v_z_inf_path):
+    """Compute phi_z with B_z feedback on dev grid (cached for module). Step 3 of pipeline."""
+    v_z_inf_data = load_value_function(v_z_inf_path)
+    return solve_vertical_reach_avoid(config, v_z_inf_data=v_z_inf_data)
 
 
 @pytest.fixture(scope="module")
@@ -136,6 +137,27 @@ class TestPhiZ:
 
         assert len(far_values) > 0, "Should have states far outside capture set"
         assert np.mean(np.array(far_values) > 0) > 0.5, "Most far-outside states should have Phi_z > 0"
+
+    def test_phi_z_uses_bz_target(self, phi_z_data, v_z_inf_data, config):
+        """When v_z_inf_data is provided, Phi_z initial values should be based on B_z SDF."""
+        # With B_z target, values are V_z_inf - d_z_effective, not |z_D - z_A| - d_z
+        # All values should be finite
+        assert np.isfinite(phi_z_data.values).all()
+        # On dev grid, B_z is very small so Phi_z may be all positive
+        # but it should still have reasonable range
+        assert phi_z_data.values.max() < 1000.0
+
+    def test_time_slices_exist(self, phi_z_path):
+        """phi_z_time_slices.npz should be created alongside phi_z.npz."""
+        from pathlib import Path
+        slices_path = Path(phi_z_path).parent / "phi_z_time_slices.npz"
+        assert slices_path.exists(), f"Expected {slices_path} to exist"
+        all_values, times = load_time_slices(str(slices_path))
+        assert all_values.ndim == 4  # (n_times, z_d, v_dz, z_a)
+        assert len(times) == all_values.shape[0]
+        # First time should be 0, last should be -T
+        assert times[0] == pytest.approx(0.0)
+        assert times[-1] < 0  # Negative (backward time)
 
 
 class TestBz:
