@@ -3,5 +3,6 @@
 from reach_avoid_game.dynamics.defender import DefenderDynamics
 from reach_avoid_game.dynamics.attacker import AttackerDynamics
 from reach_avoid_game.dynamics.vertical_game import VerticalGameDynamics
+from reach_avoid_game.dynamics.horizontal_game import HorizontalGameDynamics
 
-__all__ = ["DefenderDynamics", "AttackerDynamics", "VerticalGameDynamics"]
+__all__ = ["DefenderDynamics", "AttackerDynamics", "VerticalGameDynamics", "HorizontalGameDynamics"]
