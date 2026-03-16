@@ -1,0 +1,54 @@
+# Hardware parameters for reach-avoid game with Crazyflie drones
+
+# Crazyswarm2 adapter parameters
+crazyswarm_adapter:
+  ros__parameters:
+    defender_uri: "radio://0/80/2M/E7E7E7E701"
+    attacker_uri: "radio://0/80/2M/E7E7E7E702"
+    mocap_topic: "/mocap/rigid_bodies"
+    takeoff_height: 1.0
+    cmd_rate: 20.0
+
+# Defender controller parameters
+defender_controller:
+  ros__parameters:
+    value_function_dir: "/workspace/data/value_functions/"
+    control_rate: 50.0
+    pid_gain_z: 2.0
+    pid_gain_h: 2.0
+    margin_z_factor: 0.3
+    margin_h_factor: 0.3
+
+# Attacker controller parameters
+attacker_controller:
+  ros__parameters:
+    mode: "scripted"
+    max_speed: 0.5
+    speed_fraction: 0.8
+    target_x: 7.0
+    target_y: 4.0
+    target_z: 2.0
+
+# Safety monitor parameters
+safety_monitor:
+  ros__parameters:
+    # Room bounds (from game_params.yaml)
+    room_x_min: 0.0
+    room_x_max: 45.0
+    room_y_min: 0.0
+    room_y_max: 25.0
+    room_z_min: 0.0
+    room_z_max: 20.0
+    # Safety margins
+    geofence_margin: 0.5
+    altitude_min: 0.3
+    altitude_ceiling_margin: 0.5
+    # Speed limits
+    max_speed_defender: 6.0
+    max_speed_attacker: 3.0
+    # Inter-drone safety
+    min_inter_drone_distance: 0.5
+    # Watchdog timeout
+    state_timeout: 1.0
+    # Check rate
+    safety_rate: 50.0
