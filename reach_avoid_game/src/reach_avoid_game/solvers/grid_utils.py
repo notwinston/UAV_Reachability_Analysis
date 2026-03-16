@@ -79,3 +79,139 @@ def create_vertical_relative_grid(config: GameConfig, preset: str | None = None)
             hj.boundary_conditions.extrapolate,  # v_D_z
         ),
     )
+
+
+def create_horizontal_game_grid(config: GameConfig) -> hj.Grid:
+    """Create a 6D grid for the horizontal sub-game.
+
+    Dimensions: [x_D, y_D, v_D_x, v_D_y, x_A, y_A]
+    Domain:
+      x_D, x_A in [room.x_min, room.x_max]
+      y_D, y_A in [room.y_min, room.y_max]
+      v_D_x, v_D_y in [-U_D_h, U_D_h]
+
+    Dev grid: positions and velocities use coarse resolution, attacker
+    positions use minimal resolution to keep 6D grid tractable.
+
+    Args:
+        config: Game configuration (preset already applied)
+
+    Returns:
+        hj_reachability Grid object
+    """
+    h = config.grid.horizontal
+    u_d_h = config.defender.max_speed_horizontal
+
+    # For 6D grid, use different resolutions per dimension to stay tractable:
+    # Defender position: moderate resolution
+    # Defender velocity: fewer points
+    # Attacker position: minimal resolution (coarsest)
+    n_def_pos_x = h.coarse_pos_points
+    n_def_pos_y = h.coarse_vel_points   # fewer y points (room is narrower)
+    n_vel = h.coarse_vel_points
+    # Attacker positions: very coarse for dev to keep grid small
+    n_att_x = min(4, h.coarse_pos_points)
+    n_att_y = min(4, h.coarse_vel_points)
+
+    shape = (n_def_pos_x, n_def_pos_y, n_vel, n_vel, n_att_x, n_att_y)
+
+    domain = hj.sets.Box(
+        lo=jnp.array([
+            config.room.x_min, config.room.y_min,
+            -u_d_h, -u_d_h,
+            config.room.x_min, config.room.y_min,
+        ]),
+        hi=jnp.array([
+            config.room.x_max, config.room.y_max,
+            u_d_h, u_d_h,
+            config.room.x_max, config.room.y_max,
+        ]),
+    )
+
+    return hj.Grid.from_lattice_parameters_and_boundary_conditions(
+        domain=domain,
+        shape=shape,
+        boundary_conditions=(
+            hj.boundary_conditions.extrapolate,  # x_D
+            hj.boundary_conditions.extrapolate,  # y_D
+            hj.boundary_conditions.extrapolate,  # v_D_x
+            hj.boundary_conditions.extrapolate,  # v_D_y
+            hj.boundary_conditions.extrapolate,  # x_A
+            hj.boundary_conditions.extrapolate,  # y_A
+        ),
+    )
+
+
+def create_horizontal_relative_grid(config: GameConfig) -> hj.Grid:
+    """Create a 4D grid for horizontal relative dynamics (for V_h_T).
+
+    Dimensions: [x_rel, y_rel, v_D_x, v_D_y]
+      where x_rel = x_D - x_A, y_rel = y_D - y_A
+    Domain:
+      x_rel in [-(x_max-x_min), (x_max-x_min)]
+      y_rel in [-(y_max-y_min), (y_max-y_min)]
+      v_D_x, v_D_y in [-U_D_h, U_D_h]
+
+    Args:
+        config: Game configuration
+
+    Returns:
+        hj_reachability Grid object
+    """
+    h = config.grid.horizontal
+    u_d_h = config.defender.max_speed_horizontal
+    x_range = config.room.x_max - config.room.x_min
+    y_range = config.room.y_max - config.room.y_min
+
+    n_pos = h.coarse_pos_points
+    n_vel = h.coarse_vel_points
+
+    shape = (n_pos, n_pos, n_vel, n_vel)
+
+    domain = hj.sets.Box(
+        lo=jnp.array([-x_range, -y_range, -u_d_h, -u_d_h]),
+        hi=jnp.array([x_range, y_range, u_d_h, u_d_h]),
+    )
+
+    return hj.Grid.from_lattice_parameters_and_boundary_conditions(
+        domain=domain,
+        shape=shape,
+        boundary_conditions=(
+            hj.boundary_conditions.extrapolate,  # x_rel
+            hj.boundary_conditions.extrapolate,  # y_rel
+            hj.boundary_conditions.extrapolate,  # v_D_x
+            hj.boundary_conditions.extrapolate,  # v_D_y
+        ),
+    )
+
+
+def create_attacker_reaching_grid(config: GameConfig) -> hj.Grid:
+    """Create a 2D grid for attacker reaching computation.
+
+    Dimensions: [x_A, y_A]
+    Used to compute T_goal: earliest time attacker reaches target region.
+
+    Args:
+        config: Game configuration
+
+    Returns:
+        hj_reachability Grid object
+    """
+    h = config.grid.horizontal
+    n_pos = h.coarse_pos_points
+
+    shape = (n_pos, n_pos)
+
+    domain = hj.sets.Box(
+        lo=jnp.array([config.room.x_min, config.room.y_min]),
+        hi=jnp.array([config.room.x_max, config.room.y_max]),
+    )
+
+    return hj.Grid.from_lattice_parameters_and_boundary_conditions(
+        domain=domain,
+        shape=shape,
+        boundary_conditions=(
+            hj.boundary_conditions.extrapolate,  # x_A
+            hj.boundary_conditions.extrapolate,  # y_A
+        ),
+    )
