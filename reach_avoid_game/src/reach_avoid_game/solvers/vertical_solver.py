@@ -12,6 +12,8 @@ import jax.numpy as jnp
 import numpy as np
 import hj_reachability as hj
 
+from scipy.interpolate import RegularGridInterpolator
+
 from reach_avoid_game.config import GameConfig
 from reach_avoid_game.dynamics.vertical_game import VerticalGameDynamics
 from reach_avoid_game.dynamics.vertical_relative import VerticalRelativeDynamics
@@ -40,10 +42,72 @@ def _make_capture_set_3d(grid: hj.Grid, d_z: float) -> jnp.ndarray:
     return jnp.abs(z_d - z_a) - d_z
 
 
+def _make_capture_set_3d_from_Bz(
+    grid: hj.Grid, v_z_inf_data: ValueFunctionData, d_z: float,
+) -> jnp.ndarray:
+    """Create the capture set SDF for the 3D vertical game using B_z (Paper Eq. 38).
+
+    Instead of using the raw capture distance |z_D - z_A| <= d_z as the target,
+    this uses the invariant capture set B_z derived from V_z_inf.
+
+    For each 3D grid point (z_D, v_D_z, z_A), compute z_rel = z_D - z_A,
+    then: l(z_D, v_D_z, z_A) = V_z_inf(z_rel, v_D_z) - d_z
+
+    SDF convention: negative inside B_z (target), positive outside B_z.
+
+    Args:
+        grid: 3D grid [z_D, v_D_z, z_A]
+        v_z_inf_data: V_z_inf value function data (2D: [z_rel, v_D_z])
+        d_z: Vertical capture distance
+
+    Returns:
+        Initial value array matching grid shape
+    """
+    # Build interpolator for V_z_inf
+    z_rel_axis = np.linspace(
+        float(v_z_inf_data.grid_min[0]), float(v_z_inf_data.grid_max[0]),
+        v_z_inf_data.values.shape[0],
+    )
+    v_dz_axis = np.linspace(
+        float(v_z_inf_data.grid_min[1]), float(v_z_inf_data.grid_max[1]),
+        v_z_inf_data.values.shape[1],
+    )
+    interp = RegularGridInterpolator(
+        (z_rel_axis, v_dz_axis),
+        v_z_inf_data.values,
+        method="linear",
+        bounds_error=False,
+        fill_value=100.0,  # Large positive = clearly outside B_z
+    )
+
+    # Use effective d_z threshold (same logic as compute_invariant_set_Bz)
+    # to ensure B_z is non-empty on coarse grids
+    v_min = float(v_z_inf_data.values.min())
+    d_z_effective = max(d_z, v_min * 1.05)
+
+    # Get grid coordinates
+    z_d = np.array(grid.states[..., 0])
+    v_d_z = np.array(grid.states[..., 1])
+    z_a = np.array(grid.states[..., 2])
+
+    # Compute z_rel = z_D - z_A
+    z_rel = z_d - z_a
+
+    # Flatten, interpolate, reshape
+    shape = z_rel.shape
+    query_points = np.stack([z_rel.ravel(), v_d_z.ravel()], axis=-1)
+    v_z_inf_values = interp(query_points).reshape(shape)
+
+    # l(x) = V_z_inf(z_rel, v_D_z) - d_z_effective
+    # Negative inside B_z (target), positive outside
+    return jnp.array(v_z_inf_values - d_z_effective)
+
+
 def solve_vertical_reach_avoid(
     config: GameConfig,
     preset: str = "dev",
     output_dir: str | Path = "/workspace/data/value_functions",
+    v_z_inf_data: ValueFunctionData | None = None,
 ) -> str:
     """Solve the vertical reach-avoid game to get Phi_z.
 
@@ -55,6 +119,8 @@ def solve_vertical_reach_avoid(
         config: Game configuration
         preset: Grid preset (unused, config already has preset applied)
         output_dir: Directory to save value function
+        v_z_inf_data: If provided, use B_z (derived from V_z_inf) as the
+            target set instead of raw capture distance (Paper Eq. 38).
 
     Returns:
         Path to saved phi_z.npz
@@ -67,7 +133,12 @@ def solve_vertical_reach_avoid(
     dynamics = VerticalGameDynamics(config)
 
     # Create capture set (target for reach computation)
-    initial_values = _make_capture_set_3d(grid, config.capture.d_z)
+    if v_z_inf_data is not None:
+        # Paper Eq. 38: use B_z as target
+        initial_values = _make_capture_set_3d_from_Bz(grid, v_z_inf_data, config.capture.d_z)
+        print("  Using B_z (from V_z_inf) as target set per Paper Eq. 38")
+    else:
+        initial_values = _make_capture_set_3d(grid, config.capture.d_z)
 
     # Solver settings — no value postprocessor needed for pure reach game
     solver_settings = hj.SolverSettings.with_accuracy(
