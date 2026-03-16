@@ -21,7 +21,7 @@ from reach_avoid_game.solvers.horizontal_solver import (
 
 def main():
     parser = argparse.ArgumentParser(description="Compute horizontal sub-game value functions")
-    parser.add_argument("--preset", default="dev", choices=["dev", "paper"],
+    parser.add_argument("--preset", default="dev", choices=["dev", "medium", "paper"],
                         help="Grid resolution preset (default: dev)")
     parser.add_argument("--output-dir", default="/workspace/data/value_functions/",
                         help="Output directory for value functions")
