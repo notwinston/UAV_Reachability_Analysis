@@ -47,3 +47,30 @@ def load_value_function(path: str | Path) -> ValueFunctionData:
             params=npz["params"].item() if npz["params"].ndim == 0 else dict(npz["params"]),
             description=str(npz["description"]),
         )
+
+
+def save_time_slices(path: str | Path, all_values: np.ndarray, times: np.ndarray) -> None:
+    """Save all time slices of a value function solve.
+
+    Args:
+        path: Output .npz file path
+        all_values: Array of shape (n_times, *grid_shape) with value at each time
+        times: Array of shape (n_times,) with corresponding times
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, all_values=all_values, times=times)
+
+
+def load_time_slices(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """Load time slices of a value function solve.
+
+    Args:
+        path: Path to .npz file saved by save_time_slices
+
+    Returns:
+        Tuple of (all_values, times) arrays
+    """
+    path = Path(path)
+    with np.load(path) as npz:
+        return npz["all_values"], npz["times"]
