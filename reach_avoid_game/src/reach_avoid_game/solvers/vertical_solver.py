@@ -18,7 +18,7 @@ from reach_avoid_game.config import GameConfig
 from reach_avoid_game.dynamics.vertical_game import VerticalGameDynamics
 from reach_avoid_game.dynamics.vertical_relative import VerticalRelativeDynamics
 from reach_avoid_game.solvers.grid_utils import create_vertical_game_grid, create_vertical_relative_grid
-from reach_avoid_game.solvers.value_function_io import ValueFunctionData, save_value_function
+from reach_avoid_game.solvers.value_function_io import ValueFunctionData, save_value_function, save_time_slices
 
 
 def _make_capture_set_3d(grid: hj.Grid, d_z: float) -> jnp.ndarray:
@@ -153,6 +153,12 @@ def solve_vertical_reach_avoid(
     # Solve
     print(f"Solving vertical reach-avoid game (3D grid: {grid.states.shape[:-1]})...")
     all_values = hj.solve(solver_settings, dynamics, grid, times, initial_values, progress_bar=True)
+
+    # Save all time slices for T_capture extraction
+    all_values_np = np.array(all_values)
+    times_np = np.array(times)
+    save_time_slices(output_dir / "phi_z_time_slices.npz", all_values_np, times_np)
+    print(f"  Saved {all_values_np.shape[0]} time slices to phi_z_time_slices.npz")
 
     # The final time slice is the converged value function
     phi_z = np.array(all_values[-1])

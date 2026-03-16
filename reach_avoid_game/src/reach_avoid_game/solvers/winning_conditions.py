@@ -13,9 +13,12 @@ Key functions:
 
 from __future__ import annotations
 
-import numpy as np
+from pathlib import Path
 
-from reach_avoid_game.solvers.value_function_io import ValueFunctionData
+import numpy as np
+from scipy.interpolate import RegularGridInterpolator
+
+from reach_avoid_game.solvers.value_function_io import ValueFunctionData, load_time_slices
 from reach_avoid_game.solvers.control_extraction import interpolate_value
 
 
@@ -85,6 +88,57 @@ def compute_T_capture(
         return max(0.0, time_horizon - t_remaining)
     else:
         return float("inf")
+
+
+def compute_T_capture_from_slices(
+    time_slices_path: str | Path,
+    state_z: np.ndarray,
+    grid_min: np.ndarray,
+    grid_max: np.ndarray,
+    grid_shape: tuple[int, ...],
+) -> float:
+    """Compute T_capture from Phi_z time slices (Paper Eq. 28).
+
+    Finds the first time at which Phi_z(state_z, t) <= 0, i.e., the earliest
+    time the defender can capture the attacker vertically.
+
+    The time slices are stored from t=0 (index 0) to t=-T (index -1).
+    times[i] is the backward time value (negative). T_capture = |times[i]|.
+
+    Args:
+        time_slices_path: Path to phi_z_time_slices.npz
+        state_z: Vertical state [z_D, v_D_z, z_A]
+        grid_min: Grid minimum bounds
+        grid_max: Grid maximum bounds
+        grid_shape: Grid shape tuple
+
+    Returns:
+        T_capture in seconds. Returns inf if capture not possible.
+    """
+    all_values, times = load_time_slices(time_slices_path)
+
+    # Build grid axes
+    ndim = len(grid_shape)
+    axes = []
+    for i in range(ndim):
+        axes.append(np.linspace(float(grid_min[i]), float(grid_max[i]), grid_shape[i]))
+
+    interp_point = state_z.reshape(1, -1)
+
+    # Iterate through time slices from t=0 (index 0) forward in backward time
+    for i in range(len(times)):
+        interp = RegularGridInterpolator(
+            tuple(axes),
+            all_values[i],
+            method="linear",
+            bounds_error=False,
+            fill_value=None,
+        )
+        value = float(interp(interp_point)[0])
+        if value <= 0:
+            return abs(float(times[i]))
+
+    return float("inf")
 
 
 def check_defender_wins(
