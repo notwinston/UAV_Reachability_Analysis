@@ -1,0 +1,38 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Node.js 20 LTS (required for Claude Code)
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    git \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go 1.23 (required for Aura project)
+ARG TARGETARCH=arm64
+RUN curl -fsSL "https://go.dev/dl/go1.23.6.linux-${TARGETARCH}.tar.gz" | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Install Claude Code globally
+RUN npm install -g @anthropic-ai/claude-code
+
+# Create non-root user matching host UID for volume permissions
+RUN useradd -m -u 501 -s /bin/bash clod
+
+# Symlink so plugin marketplace paths from macOS host resolve inside container
+RUN mkdir -p /Users/winstonthov/ \
+    && ln -sf /home/clod/.claude /Users/winstonthov/.claude \
+    && chown -h clod:clod /Users/winstonthov /Users/winstonthov/.claude
+
+USER clod
+ENV GOPATH="/home/clod/go"
+ENV PATH="${GOPATH}/bin:${PATH}"
+WORKDIR /workspace
+
+COPY --chown=clod:clod entrypoint.claude.sh /entrypoint.claude.sh
+RUN chmod +x /entrypoint.claude.sh
+
+ENTRYPOINT ["/entrypoint.claude.sh"]
