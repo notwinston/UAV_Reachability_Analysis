@@ -16,7 +16,7 @@ import hj_reachability as hj
 from scipy.interpolate import RegularGridInterpolator
 
 from reach_avoid_game.config import GameConfig
-from reach_avoid_game.dynamics.horizontal_game import HorizontalGameDynamics
+from reach_avoid_game.dynamics.horizontal_game import HorizontalGameDynamics, HorizontalGameTrackingDynamics
 from reach_avoid_game.dynamics.horizontal_relative import HorizontalRelativeDynamics
 from reach_avoid_game.dynamics.attacker_reaching import AttackerReachingDynamics
 from reach_avoid_game.solvers.grid_utils import (
@@ -460,5 +460,83 @@ def solve_attacker_reaching(
     )
     save_value_function(output_path, vf_data)
     print(f"Saved phi_A_reach to {output_path}, shape: {phi_a.shape}")
+
+    return output_path
+
+
+def solve_horizontal_max_distance_6d(
+    config: GameConfig,
+    preset: str = "dev",
+    output_dir: str | Path = "/workspace/data/value_functions",
+) -> str:
+    """Solve for V_h_T in 6D absolute coordinates with obstacle penalties.
+
+    Uses HorizontalGameTrackingDynamics (defender minimizes distance).
+    Initial values: Euclidean distance sqrt((x_D - x_A)^2 + (y_D - y_A)^2).
+    Max-over-time postprocessor for worst-case tracking.
+
+    Args:
+        config: Game configuration
+        preset: Grid preset
+        output_dir: Directory to save value function
+
+    Returns:
+        Path to saved V_h_T_6d.npz
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    grid = create_horizontal_game_grid(config)
+    dynamics = HorizontalGameTrackingDynamics(config)
+
+    # Initial values: horizontal distance
+    x_d = grid.states[..., 0]
+    y_d = grid.states[..., 1]
+    x_a = grid.states[..., 4]
+    y_a = grid.states[..., 5]
+    initial_values = jnp.sqrt((x_d - x_a)**2 + (y_d - y_a)**2)
+
+    # Obstacle penalty: if defender is in obstacle, set distance to large value
+    if config.obstacles:
+        obstacle_sdf = _make_obstacle_avoid_set(grid, config)
+        if obstacle_sdf is not None:
+            penalty = jnp.where(obstacle_sdf < 0, 1000.0, 0.0)
+            initial_values = initial_values + penalty
+
+    # Per paper Section V, use T=2.5s
+    T = 2.5
+    n_steps = 50
+
+    # Max-over-time postprocessor
+    solver_settings = hj.SolverSettings.with_accuracy(
+        config.grid.solver.accuracy,
+        value_postprocessor=lambda t, v: jnp.maximum(v, initial_values),
+    )
+
+    times = jnp.linspace(0, -T, n_steps + 1)
+
+    print(f"Solving horizontal max distance 6D (grid: {grid.states.shape[:-1]})...")
+    all_values = hj.solve(solver_settings, dynamics, grid, times, initial_values, progress_bar=True)
+
+    v_h_t_6d = np.array(all_values[-1])
+
+    output_path = str(output_dir / "V_h_T_6d.npz")
+    vf_data = ValueFunctionData(
+        values=v_h_t_6d,
+        grid_min=np.array(grid.domain.lo),
+        grid_max=np.array(grid.domain.hi),
+        grid_shape=v_h_t_6d.shape,
+        params={
+            "d_h": config.capture.d_h,
+            "k_x": config.defender.k_x,
+            "k_y": config.defender.k_y,
+            "U_D_h": config.defender.max_speed_horizontal,
+            "U_A_h": config.attacker.max_speed_horizontal,
+            "time_horizon": float(T),
+        },
+        description="Horizontal maximum distance value function V_h_T (6D with obstacles)",
+    )
+    save_value_function(output_path, vf_data)
+    print(f"Saved V_h_T_6d to {output_path}, shape: {v_h_t_6d.shape}")
 
     return output_path
