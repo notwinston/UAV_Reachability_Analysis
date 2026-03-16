@@ -13,6 +13,8 @@ import jax.numpy as jnp
 import numpy as np
 import hj_reachability as hj
 
+from scipy.interpolate import RegularGridInterpolator
+
 from reach_avoid_game.config import GameConfig
 from reach_avoid_game.dynamics.horizontal_game import HorizontalGameDynamics
 from reach_avoid_game.dynamics.horizontal_relative import HorizontalRelativeDynamics
@@ -73,21 +75,111 @@ def _make_obstacle_avoid_set(grid: hj.Grid, config: GameConfig) -> jnp.ndarray:
     return combined
 
 
+def _make_avoid_set_with_Bh(
+    grid: hj.Grid, config: GameConfig, v_h_t_data: ValueFunctionData, d_h: float,
+) -> jnp.ndarray:
+    """Create avoid set combining obstacles and complement(B_h) (Paper Eq. 39).
+
+    For each 6D grid point, compute relative state and interpolate V_h_T.
+    States outside B_h (where V_h_T > d_h) must be avoided.
+
+    Combined avoid: min(l_obstacle, l_Bh_complement)
+    where l_Bh_complement = d_h - V_h_T (negative outside B_h = avoid)
+
+    Args:
+        grid: 6D grid [x_D, y_D, v_D_x, v_D_y, x_A, y_A]
+        config: Game configuration (for obstacles)
+        v_h_t_data: V_h_T value function data (4D: [x_rel, y_rel, v_D_x, v_D_y])
+        d_h: Horizontal capture distance
+
+    Returns:
+        Avoid set array (negative = to avoid, positive = safe)
+    """
+    # Build interpolator for V_h_T (4D)
+    ndim_vht = v_h_t_data.values.ndim
+    axes = []
+    for i in range(ndim_vht):
+        axes.append(np.linspace(
+            float(v_h_t_data.grid_min[i]), float(v_h_t_data.grid_max[i]),
+            v_h_t_data.values.shape[i],
+        ))
+    interp = RegularGridInterpolator(
+        tuple(axes),
+        v_h_t_data.values,
+        method="linear",
+        bounds_error=False,
+        fill_value=-100.0,  # Out-of-domain → treat as outside B_h (avoid)
+    )
+
+    # Use effective threshold (same logic as compute_invariant_set_Bh)
+    v_min = float(v_h_t_data.values.min())
+    d_h_effective = max(d_h, v_min * 1.05)
+
+    # Compute relative states from 6D grid
+    x_d = np.array(grid.states[..., 0])
+    y_d = np.array(grid.states[..., 1])
+    v_dx = np.array(grid.states[..., 2])
+    v_dy = np.array(grid.states[..., 3])
+    x_a = np.array(grid.states[..., 4])
+    y_a = np.array(grid.states[..., 5])
+
+    x_rel = x_d - x_a
+    y_rel = y_d - y_a
+
+    # Flatten, interpolate in batches, reshape
+    shape = x_rel.shape
+    n_total = x_rel.size
+    batch_size = 10000
+
+    v_h_t_values = np.zeros(n_total)
+    x_rel_flat = x_rel.ravel()
+    y_rel_flat = y_rel.ravel()
+    v_dx_flat = v_dx.ravel()
+    v_dy_flat = v_dy.ravel()
+
+    for start in range(0, n_total, batch_size):
+        end = min(start + batch_size, n_total)
+        query = np.stack([
+            x_rel_flat[start:end], y_rel_flat[start:end],
+            v_dx_flat[start:end], v_dy_flat[start:end],
+        ], axis=-1)
+        v_h_t_values[start:end] = interp(query)
+
+    v_h_t_values = v_h_t_values.reshape(shape)
+
+    # l_Bh_complement = d_h_effective - V_h_T
+    # Negative outside B_h (avoid), positive inside (safe)
+    l_bh_complement = d_h_effective - v_h_t_values
+
+    # Combine with obstacle avoid set
+    obstacle_values = _make_obstacle_avoid_set(grid, config)
+
+    if obstacle_values is not None:
+        # Combined: min of obstacle SDF and B_h complement
+        combined = jnp.minimum(np.array(obstacle_values), jnp.array(l_bh_complement))
+    else:
+        combined = jnp.array(l_bh_complement)
+
+    return combined
+
+
 def solve_horizontal_reach_avoid(
     config: GameConfig,
     preset: str = "dev",
     output_dir: str | Path = "/workspace/data/value_functions",
+    v_h_t_data: ValueFunctionData | None = None,
 ) -> str:
     """Solve the horizontal reach-avoid game to get Phi_h.
 
     6D grid: [x_D, y_D, v_D_x, v_D_y, x_A, y_A]
     Target: horizontal capture set
-    Avoid: obstacles (box SDFs in horizontal plane)
+    Avoid: obstacles, or obstacles ∪ complement(B_h) if v_h_t_data provided
 
     Args:
         config: Game configuration
         preset: Grid preset
         output_dir: Directory to save value function
+        v_h_t_data: If provided, use B_h feedback in avoid set (Paper Eq. 39).
 
     Returns:
         Path to saved phi_h.npz
@@ -101,8 +193,12 @@ def solve_horizontal_reach_avoid(
     # Target: capture set
     target_values = _make_horizontal_capture_set(grid, config.capture.d_h)
 
-    # Avoid: obstacles
-    obstacle_values = _make_obstacle_avoid_set(grid, config)
+    # Avoid set: obstacles only, or obstacles ∪ complement(B_h)
+    if v_h_t_data is not None:
+        obstacle_values = _make_avoid_set_with_Bh(grid, config, v_h_t_data, config.capture.d_h)
+        print("  Using B_h feedback in avoid set per Paper Eq. 39")
+    else:
+        obstacle_values = _make_obstacle_avoid_set(grid, config)
 
     # Time horizon: dev=10s, paper=22s
     T = 10.0 if preset == "dev" else 22.0
