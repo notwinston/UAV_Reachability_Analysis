@@ -63,6 +63,19 @@ grid_presets:
       coarse_vel_points: 11
       fine_pos_points: 21
       fine_vel_points: 11
+  medium:
+    vertical:
+      z_rel_points: 120
+      v_dz_points: 50
+    vertical_3d:
+      z_d_points: 120
+      v_dz_points: 50
+      z_a_points: 120
+    horizontal:
+      coarse_pos_points: 43
+      coarse_vel_points: 6
+      fine_pos_points: 43
+      fine_vel_points: 6
   paper:
     vertical:
       z_rel_points: 240
