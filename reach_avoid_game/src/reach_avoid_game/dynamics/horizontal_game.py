@@ -105,3 +105,63 @@ class HorizontalGameDynamics(hj.ControlAndDisturbanceAffineDynamics):
             [1.0, 0.0],
             [0.0, 1.0],
         ])
+
+
+class HorizontalGameTrackingDynamics(hj.ControlAndDisturbanceAffineDynamics):
+    """6D horizontal tracking dynamics for computing V_h_T in absolute coordinates.
+
+    Same dynamics as HorizontalGameDynamics but with reversed optimization:
+      - Defender (control) minimizes value (minimizes distance to attacker)
+      - Attacker (disturbance) maximizes value (maximizes distance from defender)
+
+    Used for the 6D extension of the maximum distance value function.
+    """
+
+    def __init__(self, config: GameConfig) -> None:
+        self.k_x = config.defender.k_x
+        self.k_y = config.defender.k_y
+        self.u_d_h = config.defender.max_speed_horizontal
+        self.u_a_h = config.attacker.max_speed_horizontal
+
+        super().__init__(
+            control_mode="min",
+            disturbance_mode="max",
+            control_space=hj.sets.Box(
+                lo=jnp.array([-self.u_d_h, -self.u_d_h]),
+                hi=jnp.array([self.u_d_h, self.u_d_h]),
+            ),
+            disturbance_space=hj.sets.Box(
+                lo=jnp.array([-self.u_a_h, -self.u_a_h]),
+                hi=jnp.array([self.u_a_h, self.u_a_h]),
+            ),
+        )
+
+    def open_loop_dynamics(self, state, time):
+        return jnp.array([
+            state[2],
+            state[3],
+            -self.k_x * state[2],
+            -self.k_y * state[3],
+            0.0,
+            0.0,
+        ])
+
+    def control_jacobian(self, state, time):
+        return jnp.array([
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [self.k_x, 0.0],
+            [0.0, self.k_y],
+            [0.0, 0.0],
+            [0.0, 0.0],
+        ])
+
+    def disturbance_jacobian(self, state, time):
+        return jnp.array([
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ])
