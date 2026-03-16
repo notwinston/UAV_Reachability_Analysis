@@ -1,0 +1,47 @@
+\contentsline {section}{\numberline {1}Project Overview}{3}{section.1}%
+\contentsline {subsection}{\numberline {1.1}Key Results}{3}{subsection.1.1}%
+\contentsline {section}{\numberline {2}Mathematical Foundation}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Dynamics Modeling}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Game Decomposition}{4}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Hamilton-Jacobi Reachability}{4}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}Invariant Capture Sets}{4}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}Computation Pipeline}{5}{subsection.2.5}%
+\contentsline {subsection}{\numberline {2.6}Capture Guarantee Analysis}{5}{subsection.2.6}%
+\contentsline {section}{\numberline {3}Implementation Architecture}{5}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Repository Structure}{5}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Offline Computation Package: \texttt {reach\_avoid\_game}}{6}{subsection.3.2}%
+\contentsline {subsubsection}{\numberline {3.2.1}Dynamics Classes}{6}{subsubsection.3.2.1}%
+\contentsline {subsubsection}{\numberline {3.2.2}Solver Functions}{6}{subsubsection.3.2.2}%
+\contentsline {subsubsection}{\numberline {3.2.3}Control Extraction}{6}{subsubsection.3.2.3}%
+\contentsline {subsubsection}{\numberline {3.2.4}Winning Conditions}{7}{subsubsection.3.2.4}%
+\contentsline {subsubsection}{\numberline {3.2.5}Value Function I/O}{7}{subsubsection.3.2.5}%
+\contentsline {subsection}{\numberline {3.3}Online Control: ROS\,2 Workspace}{8}{subsection.3.3}%
+\contentsline {subsubsection}{\numberline {3.3.1}Package Overview}{8}{subsubsection.3.3.1}%
+\contentsline {subsubsection}{\numberline {3.3.2}Defender Controller Node}{8}{subsubsection.3.3.2}%
+\contentsline {subsubsection}{\numberline {3.3.3}ROS\,2 Topic Architecture}{9}{subsubsection.3.3.3}%
+\contentsline {subsection}{\numberline {3.4}Configuration}{9}{subsection.3.4}%
+\contentsline {section}{\numberline {4}Running the Offline Computation}{10}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Prerequisites}{10}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Computing Value Functions}{10}{subsection.4.2}%
+\contentsline {subsubsection}{\numberline {4.2.1}Step 1: Vertical Pipeline}{10}{subsubsection.4.2.1}%
+\contentsline {subsubsection}{\numberline {4.2.2}Step 2: Horizontal Pipeline}{10}{subsubsection.4.2.2}%
+\contentsline {subsection}{\numberline {4.3}Running Numerical Simulations}{11}{subsection.4.3}%
+\contentsline {subsection}{\numberline {4.4}Generating Paper Figures}{11}{subsection.4.4}%
+\contentsline {subsection}{\numberline {4.5}Running Tests}{11}{subsection.4.5}%
+\contentsline {section}{\numberline {5}Running the Gazebo Simulation}{11}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Prerequisites}{11}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Docker Setup}{12}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Launch Commands}{12}{subsection.5.3}%
+\contentsline {subsection}{\numberline {5.4}Gazebo World}{13}{subsection.5.4}%
+\contentsline {subsection}{\numberline {5.5}Simulation Parameters}{13}{subsection.5.5}%
+\contentsline {section}{\numberline {6}Running on Real Drones}{13}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Hardware Requirements}{13}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Software Setup}{13}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.3}Crazyflie Configuration}{14}{subsection.6.3}%
+\contentsline {subsection}{\numberline {6.4}Pre-Flight Checklist}{14}{subsection.6.4}%
+\contentsline {subsection}{\numberline {6.5}Launch Sequence}{14}{subsection.6.5}%
+\contentsline {subsection}{\numberline {6.6}Safety Monitor}{15}{subsection.6.6}%
+\contentsline {subsection}{\numberline {6.7}Crazyswarm2 Adapter}{15}{subsection.6.7}%
+\contentsline {subsection}{\numberline {6.8}Tuning for Real Hardware}{16}{subsection.6.8}%
+\contentsline {section}{\numberline {7}Troubleshooting}{16}{section.7}%
+\contentsline {section}{\numberline {8}References}{16}{section.8}%

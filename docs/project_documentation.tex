@@ -1,0 +1,982 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in, headheight=14pt}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows.meta,positioning,fit,calc}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+
+% Colors
+\definecolor{codeblue}{HTML}{0366d6}
+\definecolor{codegray}{HTML}{586069}
+\definecolor{codebg}{HTML}{f6f8fa}
+\definecolor{warnbg}{HTML}{fff3cd}
+\definecolor{infobg}{HTML}{cce5ff}
+\definecolor{dangerbg}{HTML}{f8d7da}
+
+% Listings style
+\lstdefinestyle{bashstyle}{
+  language=bash,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codegray},
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  commentstyle=\color{codegray}\itshape,
+  keywordstyle=\color{codeblue}\bfseries,
+}
+
+\lstdefinestyle{pythonstyle}{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codegray},
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  commentstyle=\color{codegray}\itshape,
+  keywordstyle=\color{codeblue}\bfseries,
+  stringstyle=\color{red!60!black},
+}
+
+\lstdefinestyle{yamlstyle}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codegray},
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+}
+
+% tcolorbox environments
+\newtcolorbox{warningbox}{
+  colback=warnbg, colframe=orange!80!black,
+  title={\textbf{Warning}}, fonttitle=\bfseries
+}
+\newtcolorbox{infobox}{
+  colback=infobg, colframe=blue!60!black,
+  title={\textbf{Note}}, fonttitle=\bfseries
+}
+\newtcolorbox{dangerbox}{
+  colback=dangerbg, colframe=red!60!black,
+  title={\textbf{Safety Critical}}, fonttitle=\bfseries
+}
+
+% Header
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textit{Reach-Avoid Differential Game for UAVs}}
+\fancyhead[R]{\textit{Project Documentation}}
+\fancyfoot[C]{\thepage}
+
+% Title formatting
+\titleformat{\section}{\Large\bfseries}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\large\bfseries}{}{0em}{}
+
+% Theorems
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{definition}{Definition}
+
+\begin{document}
+
+% Title page
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+{\Huge\bfseries Reach-Avoid Differential Game\\[0.3cm] for UAV Interception\\[1cm]}
+{\Large Implementation Documentation\\[0.5cm]}
+\vspace{1.5cm}
+{\large Based on the paper by Bui, Monckton, and Chen\\
+\textit{``Reach-Avoid Differential Game with Reachability Analysis\\for UAVs --- A Decomposition Approach''}\\
+(arXiv:2512.22793)}
+\vspace{2cm}
+
+\begin{tabular}{ll}
+\textbf{Framework:} & Hamilton-Jacobi Reachability Analysis\\
+\textbf{Solver:} & \texttt{hj\_reachability} v0.7.0 (JAX)\\
+\textbf{Simulation:} & Gazebo Harmonic + PX4 SITL\\
+\textbf{Hardware:} & Crazyflie 2.1 + Crazyswarm2\\
+\textbf{Middleware:} & ROS\,2 Humble\\
+\end{tabular}
+
+\vfill
+{\large \today}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{Project Overview}
+%=============================================================================
+
+This project implements a \textbf{3D reach-avoid differential game} between two unmanned aerial vehicles (UAVs). One drone, the \textbf{defender}, attempts to intercept a second drone, the \textbf{attacker}, before the attacker reaches a designated target region. The attacker simultaneously tries to navigate to its goal while avoiding both obstacles and the defender.
+
+The core challenge is that computing optimal strategies for two drones in 3D space would require solving a Hamilton-Jacobi (HJ) partial differential equation on a \textbf{24-dimensional} joint state space (12 dimensions per quadrotor). This is computationally intractable. The paper introduces a \textbf{decomposition framework} that splits the problem into two solvable sub-games:
+
+\begin{enumerate}
+    \item \textbf{Horizontal sub-game (6D):} Models the x-y plane dynamics of both drones, including obstacles and the target region.
+    \item \textbf{Vertical sub-game (3D):} Models the z-axis dynamics of both drones.
+\end{enumerate}
+
+Each sub-game is solved independently using HJ reachability analysis, and the solutions are recombined using a novel \textbf{reach-track control algorithm} that provides provable capture guarantees.
+
+The implementation spans three layers:
+
+\begin{itemize}
+    \item \textbf{Offline computation:} Value functions are solved on a discretized grid using the \texttt{hj\_reachability} library (JAX/GPU-accelerated). These represent optimal strategies for all possible states.
+    \item \textbf{Online control:} A real-time ROS\,2 controller reads drone states, interpolates precomputed value functions, extracts optimal controls via gradient computation, and publishes velocity commands at 50\,Hz.
+    \item \textbf{Simulation \& hardware:} The game runs in Gazebo with PX4 autopilot for physics-based validation, or on real Crazyflie~2.1 drones with motion capture for state estimation.
+\end{itemize}
+
+\subsection{Key Results}
+
+\begin{itemize}
+    \item The decomposition reduces the problem from 24D (intractable) to a 6D + 3D pair (solvable in minutes to hours).
+    \item Formal capture guarantees: if the initial state is in the defender's \textbf{winning region}, the defender is guaranteed to capture the attacker regardless of the attacker's strategy.
+    \item The solution is \textbf{conservative}: the decomposition's winning region is a subset of the true optimal winning region, meaning the defender never falsely claims it can win.
+\end{itemize}
+
+
+%=============================================================================
+\section{Mathematical Foundation}
+%=============================================================================
+
+\subsection{Dynamics Modeling}
+
+Both drones are simplified from the full 12D quadrotor dynamics:
+
+\begin{definition}[Defender --- Double Integrator]
+The defender has inertia (cannot change velocity instantaneously):
+\begin{equation}
+\dot{x}_D = v_D, \qquad \dot{v}_D = K(u - v_D)
+\label{eq:defender}
+\end{equation}
+where $u$ is the velocity command and $K = \text{diag}(k_x, k_y, k_z)$ are proportional gains. The state is 6D: position $(x_D, y_D, z_D)$ and velocity $(v_{D,x}, v_{D,y}, v_{D,z})$.
+\end{definition}
+
+\begin{definition}[Attacker --- Single Integrator]
+The attacker has no inertia (controls velocity directly):
+\begin{equation}
+\dot{x}_A = d
+\label{eq:attacker}
+\end{equation}
+where $d$ is the attacker's velocity command. The state is 3D: position $(x_A, y_A, z_A)$. This \textbf{overestimates} the attacker's capability, making the defender's strategy more conservative.
+\end{definition}
+
+\textbf{Speed constraints:}
+\begin{align}
+\|(u_x, u_y)\| &\leq U_D^h = 6~\text{m/s}, & \|(d_x, d_y)\| &\leq U_A^h = 3~\text{m/s} \\
+|u_z| &\leq U_D^z = 4~\text{m/s}, & |d_z| &\leq U_A^z = 2~\text{m/s}
+\end{align}
+
+The defender is twice as fast as the attacker in all directions.
+
+\subsection{Game Decomposition}
+
+The capture condition is decomposed from a sphere into a \textbf{cylinder}:
+
+\begin{itemize}
+    \item \textbf{Original:} $\|p_A - p_D\|_2 \leq d_c$ \quad (spherical capture zone)
+    \item \textbf{Decomposed:}
+    \begin{align}
+        \textbf{Horizontal:} \quad & \sqrt{(x_A - x_D)^2 + (y_A - y_D)^2} \leq d_h = 3~\text{m} \\
+        \textbf{Vertical:} \quad & |z_A - z_D| \leq d_z = 1~\text{m}
+    \end{align}
+\end{itemize}
+
+\textbf{Key assumption:} The target region $\mathcal{T}$ and obstacles depend only on horizontal $(x,y)$ coordinates, not altitude. This is practical for airspace corridor scenarios.
+
+\subsection{Hamilton-Jacobi Reachability}
+
+For each sub-game, we solve the HJ variational inequality backward in time:
+\begin{equation}
+\min\left\{\frac{\partial V}{\partial t} + H\left(x, \nabla_x V\right),\; V(x,t) - l(x)\right\} = 0
+\label{eq:hji}
+\end{equation}
+where the Hamiltonian is:
+\begin{equation}
+H(x, p) = \max_u \min_d \; p \cdot f(x, u, d)
+\end{equation}
+
+The defender maximizes (tries to capture) and the attacker minimizes (tries to escape). The \textbf{zero level set} $\{x : V(x) \leq 0\}$ defines the winning region.
+
+\subsection{Invariant Capture Sets}
+
+Simply combining the two sub-game solutions does not guarantee simultaneous capture in both directions. The defender might overshoot vertically due to inertia while capturing horizontally. The solution uses \textbf{invariant capture sets}:
+
+\begin{definition}[Invariant Capture Set $\mathcal{B}_z$]
+$\mathcal{B}_z = \{x : V_{z,\infty}(x) \leq d_z\}$ where $V_{z,\infty}$ is the maximum distance value function. Once inside $\mathcal{B}_z$, the defender can keep $|z_D - z_A| \leq d_z$ \textbf{forever} using a tracking controller.
+\end{definition}
+
+\begin{definition}[Invariant Capture Set $\mathcal{B}_h$]
+$\mathcal{B}_h = \{x : V_{h,T}(x) \leq d_h\}$ where $V_{h,T}$ is computed with $T = 2.5$\,s (does not converge as $T \to \infty$ due to the horizontal dynamics structure).
+\end{definition}
+
+These feed back into the reach-avoid computation: $\Phi_z$ uses $\mathcal{B}_z$ as its target set (Eq.~38 of the paper), and $\Phi_h$ uses the complement of $\mathcal{B}_h$ as part of its avoid set (Eq.~39).
+
+\subsection{Computation Pipeline}
+
+The correct computation order (matching the paper) is:
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=1.4cm,
+    block/.style={rectangle, draw, rounded corners, fill=blue!10, minimum width=3cm, minimum height=0.8cm, align=center, font=\small},
+    arrow/.style={-{Stealth[length=3mm]}, thick},
+]
+    % Vertical pipeline
+    \node[block] (vzinf) {$V_{z,\infty}$ (2D relative)};
+    \node[block, below=of vzinf] (bz) {$\mathcal{B}_z$ threshold};
+    \node[block, below=of bz] (phiz) {$\Phi_z$ (3D, target=$\mathcal{B}_z$)};
+
+    \draw[arrow] (vzinf) -- (bz);
+    \draw[arrow] (bz) -- (phiz);
+    \draw[arrow] (vzinf.east) -- ++(0.8,0) |- (phiz.east) node[midway, right, font=\scriptsize] {SDF init};
+
+    % Horizontal pipeline
+    \node[block, right=4cm of vzinf] (vht) {$V_{h,T}$ (4D relative)};
+    \node[block, below=of vht] (bh) {$\mathcal{B}_h$ threshold};
+    \node[block, below=of bh] (phih) {$\Phi_h$ (6D, avoid=$\overline{\mathcal{B}_h}$)};
+
+    \draw[arrow] (vht) -- (bh);
+    \draw[arrow] (bh) -- (phih);
+    \draw[arrow] (vht.east) -- ++(0.8,0) |- (phih.east) node[midway, right, font=\scriptsize] {avoid set};
+
+    % Labels
+    \node[above=0.3cm of vzinf, font=\bfseries] {Vertical Pipeline};
+    \node[above=0.3cm of vht, font=\bfseries] {Horizontal Pipeline};
+\end{tikzpicture}
+\end{center}
+
+\subsection{Capture Guarantee Analysis}
+
+\begin{theorem}[Defender Wins]
+The defender is guaranteed to capture the attacker if all of the following hold:
+\begin{enumerate}
+    \item $x^z \in \mathcal{W}_{D,z}$ --- vertical state is in defender's vertical winning region
+    \item $T_\text{goal} > T_\text{capture}$ --- defender captures vertically before attacker reaches goal
+    \item $x^h \in \mathcal{W}_{D,h}$ --- horizontal state is in defender's horizontal winning region
+\end{enumerate}
+\end{theorem}
+
+Where $T_\text{goal}$ is the earliest time the attacker can reach its target (from $\Phi_{A,\text{reach}}$) and $T_\text{capture}$ is the earliest time the defender achieves vertical capture (from $\Phi_z$ time slices).
+
+
+%=============================================================================
+\section{Implementation Architecture}
+%=============================================================================
+
+\subsection{Repository Structure}
+
+\begin{lstlisting}[style=bashstyle, title=\textbf{Top-Level Directory Layout}]
+/workspace/
+  config/
+    game_params.yaml        # Game parameters and grid presets
+  data/
+    value_functions/        # Precomputed .npz value function files
+    plots/paper_figures/    # Generated paper figures
+    simulations/            # Simulation trajectory outputs
+  reach_avoid_game/         # Core Python package (offline computation)
+    src/reach_avoid_game/
+      config.py             # GameConfig dataclass
+      dynamics/             # HJ dynamics classes
+      solvers/              # HJ solvers and utilities
+      visualization/        # Plotting functions
+    scripts/                # CLI entry points
+    tests/                  # Pytest test suite (60 tests)
+  reach_avoid_ws/           # ROS 2 workspace (online control)
+    src/
+      reach_avoid_bringup/  # Launch files and parameters
+      reach_avoid_sim/      # Gazebo adapters, PX4 bridge
+      reach_avoid_controller/ # Defender reach-track controller
+      attacker_controller/  # Attacker control modes
+      reach_avoid_viz/      # RViz MarkerArray visualization
+      reach_avoid_hw/       # Crazyflie hardware interface
+\end{lstlisting}
+
+\subsection{Offline Computation Package: \texttt{reach\_avoid\_game}}
+
+\subsubsection{Dynamics Classes}
+
+Each dynamics class inherits from \texttt{hj.ControlAndDisturbanceAffineDynamics} and implements three methods:
+
+\begin{table}[h]
+\centering
+\caption{Dynamics classes and their state spaces.}
+\begin{tabular}{lccl}
+\toprule
+\textbf{Class} & \textbf{Dim} & \textbf{State} & \textbf{File} \\
+\midrule
+\texttt{VerticalGameDynamics} & 3D & $(z_D, v_{D,z}, z_A)$ & \texttt{vertical\_game.py} \\
+\texttt{VerticalRelativeDynamics} & 2D & $(z_\text{rel}, v_{D,z})$ & \texttt{vertical\_relative.py} \\
+\texttt{HorizontalGameDynamics} & 6D & $(x_D, y_D, v_{D,x}, v_{D,y}, x_A, y_A)$ & \texttt{horizontal\_game.py} \\
+\texttt{HorizontalRelativeDynamics} & 4D & $(x_\text{rel}, y_\text{rel}, v_{D,x}, v_{D,y})$ & \texttt{horizontal\_relative.py} \\
+\texttt{HorizontalGameTrackingDynamics} & 6D & same as above & \texttt{horizontal\_game.py} \\
+\texttt{AttackerReachingDynamics} & 2D & $(x_A, y_A)$ & \texttt{attacker\_reaching.py} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each class provides:
+\begin{itemize}
+    \item \texttt{open\_loop\_dynamics(state, time)} --- drift dynamics $f(x)$ when $u = 0$, $d = 0$
+    \item \texttt{control\_jacobian(state, time)} --- matrix $G_u$ mapping control to state derivatives
+    \item \texttt{disturbance\_jacobian(state, time)} --- matrix $G_d$ mapping disturbance to state derivatives
+\end{itemize}
+
+The \texttt{HorizontalGameTrackingDynamics} class is identical to \texttt{HorizontalGameDynamics} except with \textbf{swapped optimization}: \texttt{control\_mode="min"} (defender minimizes distance) and \texttt{disturbance\_mode="max"} (attacker maximizes distance). This is used for computing the maximum distance value function $V_{h,T}$ in 6D coordinates with obstacle penalties.
+
+\subsubsection{Solver Functions}
+
+All solvers are in the \texttt{solvers/} subdirectory:
+
+\begin{table}[h]
+\centering
+\caption{Value functions computed by each solver function.}
+\begin{tabular}{llcp{5.5cm}}
+\toprule
+\textbf{Function} & \textbf{Output} & \textbf{Grid} & \textbf{Description} \\
+\midrule
+\texttt{solve\_vertical\_max\_distance} & $V_{z,\infty}$ & 2D & Max distance tracking (converged) \\
+\texttt{compute\_invariant\_set\_Bz} & $\mathcal{B}_z$ & 2D & Threshold $V_{z,\infty} \leq d_z$ \\
+\texttt{solve\_vertical\_reach\_avoid} & $\Phi_z$ & 3D & Vertical reach-avoid with $\mathcal{B}_z$ target \\
+\texttt{solve\_horizontal\_max\_distance} & $V_{h,T}$ & 4D & Max distance tracking ($T=2.5$\,s) \\
+\texttt{compute\_invariant\_set\_Bh} & $\mathcal{B}_h$ & 4D & Threshold $V_{h,T} \leq d_h$ \\
+\texttt{solve\_attacker\_reaching} & $\Phi_{A,\text{reach}}$ & 2D & Attacker time-to-goal \\
+\texttt{solve\_horizontal\_reach\_avoid} & $\Phi_h$ & 6D & Horizontal reach-avoid with $\overline{\mathcal{B}_h}$ avoid \\
+\texttt{solve\_horizontal\_max\_distance\_6d} & $V_{h,T}^{6D}$ & 6D & 6D extension with obstacles \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Control Extraction}
+
+Optimal controls are extracted from value function gradients using central finite differences:
+
+\begin{equation}
+\nabla V(x) \approx \left[\frac{V(x + h\,e_i) - V(x - h\,e_i)}{2h}\right]_{i=1}^n
+\end{equation}
+
+The defender's optimal control (maximizing the value function):
+\begin{equation}
+u_z^* = U_{D,z} \cdot \text{sign}\!\left(\frac{\partial V}{\partial v_{D,z}} \cdot k_z\right)
+\end{equation}
+
+The attacker's optimal disturbance (minimizing the value function):
+\begin{equation}
+d_z^* = -U_{A,z} \cdot \text{sign}\!\left(\frac{\partial V}{\partial z_A}\right)
+\end{equation}
+
+Value function interpolation uses \texttt{scipy.interpolate.RegularGridInterpolator} with linear interpolation and appropriate boundary handling (\texttt{fill\_value} set to large positive values for out-of-domain queries).
+
+\subsubsection{Winning Conditions}
+
+The \texttt{winning\_conditions.py} module implements:
+
+\begin{itemize}
+    \item \texttt{compute\_T\_goal}: Estimates earliest time the attacker reaches its target from $\Phi_{A,\text{reach}}$.
+    \item \texttt{compute\_T\_capture}: Estimates vertical capture time from $\Phi_z$ magnitude.
+    \item \texttt{compute\_T\_capture\_from\_slices}: The paper-accurate method --- iterates through saved $\Phi_z$ time slices and finds the first time at which $\Phi_z(x, t) \leq 0$.
+    \item \texttt{check\_defender\_wins}: Combined check of all winning conditions.
+    \item \texttt{get\_winning\_regions}: Extracts $\mathcal{W}_D$ and $\mathcal{W}_A$ masks from a value function.
+\end{itemize}
+
+\subsubsection{Value Function I/O}
+
+All value functions are stored as NumPy \texttt{.npz} files with a standardized format:
+
+\begin{lstlisting}[style=pythonstyle]
+@dataclass
+class ValueFunctionData:
+    values: np.ndarray       # The value function array
+    grid_min: np.ndarray     # Grid lower bounds
+    grid_max: np.ndarray     # Grid upper bounds
+    grid_shape: tuple        # Grid dimensions
+    params: dict             # Game parameters used
+    description: str         # Human-readable description
+\end{lstlisting}
+
+Time slices (for $T_\text{capture}$ extraction) are stored separately as \texttt{phi\_z\_time\_slices.npz} containing the full time evolution of $\Phi_z$.
+
+\subsection{Online Control: ROS\,2 Workspace}
+
+\subsubsection{Package Overview}
+
+\begin{table}[h]
+\centering
+\caption{ROS\,2 packages and their roles.}
+\begin{tabular}{lp{8cm}}
+\toprule
+\textbf{Package} & \textbf{Purpose} \\
+\midrule
+\texttt{reach\_avoid\_bringup} & Launch files, configuration YAML, dependency management \\
+\texttt{reach\_avoid\_sim} & PX4 adapter (MAVLink $\leftrightarrow$ ROS\,2), ground truth relay from Gazebo \\
+\texttt{reach\_avoid\_controller} & Defender controller implementing Algorithms 1 \& 2 with value function lookup \\
+\texttt{attacker\_controller} & Attacker with modes: scripted waypoints, keyboard teleop, optimal escape, switchable \\
+\texttt{reach\_avoid\_viz} & MarkerArray publisher for obstacles, target, capture zones in RViz \\
+\texttt{reach\_avoid\_hw} & Crazyswarm2 adapter for Crazyflie drones, safety monitor \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Defender Controller Node}
+
+The \texttt{DefenderControllerNode} runs at 50\,Hz and implements the two-algorithm reach-track controller:
+
+\begin{algorithm}[H]
+\caption{Vertical Reach-Track (Algorithm 1)}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Vertical state $(z_D, v_{D,z}, z_A)$, value functions $\Phi_z$, $V_{z,\infty}$, $\mathcal{B}_z$
+\State Compute $z_\text{rel} \gets z_D - z_A$
+\State Look up $\mathcal{B}_z(z_\text{rel}, v_{D,z})$
+\If{NOT in $\mathcal{B}_z$}
+    \State $u_z \gets$ optimal reaching control from $\nabla\Phi_z$ \Comment{Mode: REACHING}
+\ElsIf{deep inside $\mathcal{B}_z$}
+    \State $u_z \gets \text{PID}(z_A - z_D)$ \Comment{Mode: PID}
+\Else
+    \State $u_z \gets$ optimal tracking control from $\nabla V_{z,\infty}$ \Comment{Mode: TRACKING}
+\EndIf
+\State \Return $u_z$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Horizontal Reach-Track-Avoid (Algorithm 2)}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Horizontal state $(x_D, y_D, v_{D,x}, v_{D,y}, x_A, y_A)$, value functions $\Phi_h$, $V_{h,T}$, $\mathcal{B}_h$
+\State Compute relative state $(x_\text{rel}, y_\text{rel}, v_{D,x}, v_{D,y})$
+\State Look up $\mathcal{B}_h(x_\text{rel}, y_\text{rel}, v_{D,x}, v_{D,y})$
+\If{NOT in $\mathcal{B}_h$}
+    \State $(u_x, u_y) \gets$ optimal reaching control from $\nabla\Phi_h$ \Comment{Mode: REACHING}
+\ElsIf{deep inside $\mathcal{B}_h$}
+    \State $(u_x, u_y) \gets \text{PID}(x_A - x_D, y_A - y_D)$ \Comment{Mode: PID}
+\Else
+    \State $(u_x, u_y) \gets$ optimal tracking control from $\nabla V_{h,T}$ \Comment{Mode: TRACKING}
+\EndIf
+\State \Return $(u_x, u_y)$
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{ROS\,2 Topic Architecture}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=1.5cm and 2.5cm,
+    block/.style={rectangle, draw, rounded corners, fill=blue!10, minimum width=2.5cm, minimum height=0.7cm, align=center, font=\footnotesize},
+    topic/.style={rectangle, draw, dashed, fill=yellow!10, minimum width=2cm, minimum height=0.5cm, align=center, font=\scriptsize\ttfamily},
+    arrow/.style={-{Stealth[length=2mm]}, thick},
+]
+    \node[block] (gazebo) {Gazebo / MoCap};
+    \node[block, right=3cm of gazebo] (adapter) {PX4 Adapter /\\ Crazyswarm Adapter};
+    \node[block, right=3cm of adapter] (defender) {Defender\\ Controller};
+    \node[block, below=2cm of defender] (attacker) {Attacker\\ Controller};
+    \node[block, below=1cm of gazebo] (safety) {Safety\\ Monitor};
+    \node[block, above=1cm of defender] (viz) {Game Viz\\ + RViz};
+
+    \draw[arrow] (gazebo) -- node[above, font=\scriptsize] {ground truth} (adapter);
+    \draw[arrow] (adapter) -- node[above, font=\scriptsize] {/defender/state} (defender);
+    \draw[arrow] (adapter) |- node[near end, above, font=\scriptsize] {/attacker/state} (attacker);
+    \draw[arrow] (defender) -- node[right, font=\scriptsize] {/defender/cmd\_vel} ++(0,-1) -| (adapter);
+    \draw[arrow] (adapter) |- (safety);
+    \draw[arrow] (defender) -- (viz);
+\end{tikzpicture}
+\end{center}
+
+Key topics:
+\begin{itemize}[noitemsep]
+    \item \texttt{/defender/state} (\texttt{PoseStamped}) --- defender position from ground truth
+    \item \texttt{/attacker/state} (\texttt{PoseStamped}) --- attacker position
+    \item \texttt{/defender/cmd\_vel} (\texttt{Twist}) --- velocity command to PX4/Crazyflie
+    \item \texttt{/game/status} (\texttt{String}) --- game status (CAPTURED, DEFENDER\_WINNING, etc.)
+    \item \texttt{/safety/emergency} (\texttt{Bool}) --- emergency landing trigger
+\end{itemize}
+
+\subsection{Configuration}
+
+All game parameters are defined in \texttt{config/game\_params.yaml}:
+
+\begin{lstlisting}[style=yamlstyle, title=\textbf{Key parameters from game\_params.yaml}]
+room:
+  x_min: 0.0    x_max: 45.0
+  y_min: 0.0    y_max: 25.0
+  z_min: 0.0    z_max: 20.0
+defender:
+  max_speed_horizontal: 6.0    # m/s
+  max_speed_vertical: 4.0      # m/s
+  k_x: 0.7    k_y: 0.7    k_z: 1.5
+attacker:
+  max_speed_horizontal: 3.0    # m/s
+  max_speed_vertical: 2.0      # m/s
+capture:
+  d_h: 3.0    # horizontal capture distance (m)
+  d_z: 1.0    # vertical capture distance (m)
+target_region:
+  x_min: 38.0    x_max: 45.0
+  y_min: 10.0    y_max: 15.0
+obstacles:
+  - type: box
+    x_min: 15.0    x_max: 20.0
+    y_min: 5.0     y_max: 20.0
+\end{lstlisting}
+
+Three grid presets are available:
+
+\begin{table}[h]
+\centering
+\caption{Grid resolution presets.}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Preset} & \textbf{Vertical 2D} & \textbf{Vertical 3D} & \textbf{Horizontal 4D/6D} \\
+\midrule
+\texttt{dev} & $51 \times 31$ & $24 \times 10 \times 24$ & $21^2 \times 11^2$ \\
+\texttt{medium} & $120 \times 50$ & $120 \times 50 \times 120$ & $43^2 \times 6^2$ \\
+\texttt{paper} & $240 \times 100$ & $240 \times 100 \times 240$ & $85^2 \times 8^2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+%=============================================================================
+\section{Running the Offline Computation}
+%=============================================================================
+
+\subsection{Prerequisites}
+
+\begin{lstlisting}[style=bashstyle]
+# Install the reach_avoid_game package (editable mode)
+cd /workspace/reach_avoid_game
+pip install -e ".[dev]"
+
+# Verify installation
+python3 -c "import reach_avoid_game; print('OK')"
+python3 -c "import hj_reachability; print('hj_reachability OK')"
+\end{lstlisting}
+
+\subsection{Computing Value Functions}
+
+The computation must follow the correct dependency order.
+
+\subsubsection{Step 1: Vertical Pipeline}
+
+\begin{lstlisting}[style=bashstyle]
+# Compute V_z_inf -> B_z -> Phi_z (with B_z feedback)
+python3 /workspace/reach_avoid_game/scripts/compute_vertical.py \
+    --preset dev
+
+# Output files:
+#   /workspace/data/value_functions/V_z_inf.npz
+#   /workspace/data/value_functions/B_z.npz
+#   /workspace/data/value_functions/phi_z.npz
+#   /workspace/data/value_functions/phi_z_time_slices.npz
+\end{lstlisting}
+
+\subsubsection{Step 2: Horizontal Pipeline}
+
+\begin{lstlisting}[style=bashstyle]
+# Compute V_h_T -> B_h -> phi_A_reach -> Phi_h (with B_h feedback)
+python3 /workspace/reach_avoid_game/scripts/compute_horizontal.py \
+    --preset dev
+
+# Optional: include 6D extension
+python3 /workspace/reach_avoid_game/scripts/compute_horizontal.py \
+    --preset dev --include-6d
+
+# Output files:
+#   /workspace/data/value_functions/V_h_T.npz
+#   /workspace/data/value_functions/B_h.npz
+#   /workspace/data/value_functions/phi_A_reach.npz
+#   /workspace/data/value_functions/phi_h.npz
+#   /workspace/data/value_functions/V_h_T_6d.npz  (if --include-6d)
+\end{lstlisting}
+
+\begin{infobox}
+The \texttt{dev} preset takes minutes. The \texttt{medium} preset takes tens of minutes. The \texttt{paper} preset ($\sim$3 hours for $\Phi_h$ alone) requires significant RAM and ideally a GPU.
+\end{infobox}
+
+\subsection{Running Numerical Simulations}
+
+\begin{lstlisting}[style=bashstyle]
+# Vertical-only simulation (Algorithm 1)
+python3 /workspace/reach_avoid_game/scripts/numerical_sim.py \
+    --mode vertical --T 10.0
+
+# Combined 3D simulation (Algorithm 1 + Algorithm 2)
+python3 /workspace/reach_avoid_game/scripts/numerical_sim.py \
+    --mode combined --T 10.0
+
+# Quick sanity check (1 step, verifies value function loading)
+python3 /workspace/reach_avoid_game/scripts/numerical_sim.py \
+    --mode combined --check-only
+\end{lstlisting}
+
+\subsection{Generating Paper Figures}
+
+\begin{lstlisting}[style=bashstyle]
+python3 /workspace/reach_avoid_game/scripts/generate_paper_figures.py \
+    --output-dir /workspace/data/plots/paper_figures/ \
+    --preset dev
+\end{lstlisting}
+
+This generates 10 figures corresponding to Figures 4--12 of the paper: $\mathcal{B}_z$ invariant set, $\Phi_z$ slices, vertical 3D view, $\mathcal{B}_h$ invariant set, $\Phi_h$ slices, winning regions, simulation trajectories, and a combined 3D game view.
+
+\subsection{Running Tests}
+
+\begin{lstlisting}[style=bashstyle]
+cd /workspace/reach_avoid_game
+python3 -m pytest tests/ -v
+
+# 60 tests covering:
+#   - Grid dimensions and value function shapes
+#   - Phi_z properties (monotonicity, sign conventions)
+#   - B_z non-emptiness and center containment
+#   - Control extraction within speed limits
+#   - Gradient finite-ness
+#   - T_capture from time slices
+#   - Winning region partitioning
+#   - Value function I/O round-trip
+\end{lstlisting}
+
+
+%=============================================================================
+\section{Running the Gazebo Simulation}
+%=============================================================================
+
+\subsection{Prerequisites}
+
+The Gazebo simulation requires:
+\begin{itemize}
+    \item ROS\,2 Humble
+    \item Gazebo Harmonic
+    \item PX4 Autopilot SITL (Software-In-The-Loop)
+    \item micro-XRCE-DDS-Agent (PX4 $\leftrightarrow$ ROS\,2 bridge)
+    \item NVIDIA GPU with \texttt{nvidia-container-toolkit} (for Docker)
+\end{itemize}
+
+These are \textbf{not} installed in the development environment. Use Docker.
+
+\subsection{Docker Setup}
+
+\begin{lstlisting}[style=bashstyle]
+# Step 1: Build the simulation Docker image
+docker build -f Dockerfile.sim -t reach-avoid-sim .
+
+# Step 2: Allow X11 display forwarding (for Gazebo GUI)
+xhost +local:docker
+
+# Step 3: Start the simulation container
+docker-compose -f docker-compose.sim.yml up
+\end{lstlisting}
+
+The Docker image (\texttt{Dockerfile.sim}) installs:
+\begin{itemize}[noitemsep]
+    \item Ubuntu 22.04 base
+    \item ROS\,2 Humble Desktop (\texttt{ros-humble-desktop})
+    \item Gazebo Harmonic bridge (\texttt{ros-humble-ros-gz})
+    \item PX4 Autopilot compiled for SITL with \texttt{gz\_x500} model
+    \item micro-XRCE-DDS-Agent from source
+    \item \texttt{px4\_msgs} and \texttt{px4\_ros\_com} ROS\,2 packages
+    \item The full \texttt{reach\_avoid\_ws} workspace, pre-built with \texttt{colcon build}
+\end{itemize}
+
+The \texttt{docker-compose.sim.yml} mounts:
+\begin{itemize}[noitemsep]
+    \item \texttt{./data/value\_functions} $\to$ container (read-only) for precomputed value functions
+    \item \texttt{./config} $\to$ container (read-only) for game parameters
+    \item X11 socket for Gazebo GUI display
+\end{itemize}
+
+\subsection{Launch Commands}
+
+Once inside the Docker container:
+
+\begin{lstlisting}[style=bashstyle]
+# Source the workspace
+source /home/simuser/ws/install/setup.bash
+
+# Launch simulation only (Gazebo + PX4 + adapters + attacker)
+ros2 launch reach_avoid_bringup simulation.launch.py \
+    attacker_mode:=scripted
+
+# Launch full game (simulation + defender controller + viz + RViz)
+ros2 launch reach_avoid_bringup full_game.launch.py \
+    attacker_mode:=scripted \
+    value_function_dir:=/home/simuser/ws/data/value_functions/
+
+# Launch attacker only (no Gazebo, for testing controller logic)
+ros2 launch reach_avoid_bringup attacker_only.launch.py
+\end{lstlisting}
+
+\textbf{Attacker modes:}
+\begin{itemize}[noitemsep]
+    \item \texttt{scripted} --- follows predefined waypoints toward target
+    \item \texttt{keyboard} --- manual control via \texttt{teleop\_twist\_keyboard}
+    \item \texttt{optimal} --- uses value function gradient for optimal escape
+    \item \texttt{switchable} --- switch between modes at runtime
+\end{itemize}
+
+\subsection{Gazebo World}
+
+The simulation world (\texttt{reach\_avoid\_arena.sdf}) defines:
+\begin{itemize}[noitemsep]
+    \item $8 \times 8 \times 4$\,m room with four walls
+    \item Red obstacle box at $x \in [3,4]$, $y \in [2,6]$\,m
+    \item Green transparent target region at $x \in [6,8]$, $y \in [3,5]$\,m
+    \item DART physics at 1\,kHz, real-time factor 1.0
+    \item Two PX4 x500 quadrotor models (defender and attacker)
+\end{itemize}
+
+\subsection{Simulation Parameters}
+
+The file \texttt{reach\_avoid\_bringup/config/simulation\_params.yaml} configures:
+\begin{itemize}[noitemsep]
+    \item Topic names for defender/attacker state, velocity, and commands
+    \item PX4 vehicle IDs (defender=1, attacker=2) and MAVLink ports
+    \item Gazebo model names (\texttt{x500\_defender}, \texttt{x500\_attacker})
+    \item Control rates: PX4 heartbeat 20\,Hz, ground truth 50\,Hz, control 20\,Hz
+    \item Default attacker waypoints navigating around the obstacle to the target
+\end{itemize}
+
+
+%=============================================================================
+\section{Running on Real Drones}
+%=============================================================================
+
+\begin{dangerbox}
+Hardware deployment involves real flying robots. Always have a safety pilot ready. Always test with conservative speed limits first. The safety monitor will trigger emergency landing on any violation, but human oversight is essential.
+\end{dangerbox}
+
+\subsection{Hardware Requirements}
+
+\begin{table}[h]
+\centering
+\caption{Required hardware components.}
+\begin{tabular}{lp{8cm}}
+\toprule
+\textbf{Component} & \textbf{Details} \\
+\midrule
+Crazyflie 2.1 (x2) & One defender, one attacker. Must have unique radio addresses. \\
+Crazyradio PA (x1) & USB radio dongle for communicating with Crazyflies. \\
+Motion capture system & OptiTrack, Vicon, or similar. Must publish pose at $\geq$100\,Hz. \\
+Ground station PC & Ubuntu 22.04, ROS\,2 Humble, Crazyswarm2 installed. \\
+Flying arena & Minimum $4 \times 4 \times 3$\,m clear space with safety nets. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Software Setup}
+
+\begin{lstlisting}[style=bashstyle]
+# 1. Install ROS 2 Humble (if not already installed)
+sudo apt install ros-humble-desktop
+
+# 2. Install Crazyswarm2
+mkdir -p ~/crazyswarm2_ws/src
+cd ~/crazyswarm2_ws/src
+git clone https://github.com/IMRCLab/crazyswarm2
+cd ..
+colcon build --symlink-install
+source install/setup.bash
+
+# 3. Build the reach_avoid_ws workspace
+cd /workspace/reach_avoid_ws
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
+source install/setup.bash
+
+# 4. Install the offline computation package
+cd /workspace/reach_avoid_game
+pip install -e .
+
+# 5. Compute value functions (use medium or paper preset for real flights)
+python3 scripts/compute_vertical.py --preset medium
+python3 scripts/compute_horizontal.py --preset medium
+\end{lstlisting}
+
+\subsection{Crazyflie Configuration}
+
+Edit \texttt{reach\_avoid\_bringup/config/hardware\_params.yaml}:
+
+\begin{lstlisting}[style=yamlstyle]
+crazyswarm_adapter:
+  ros__parameters:
+    defender_uri: "radio://0/80/2M/E7E7E7E701"
+    attacker_uri: "radio://0/80/2M/E7E7E7E702"
+    mocap_topic: "/mocap/rigid_bodies"
+    takeoff_height: 1.0
+    cmd_rate: 20.0
+\end{lstlisting}
+
+Change the URIs to match your Crazyflie radio addresses. The motion capture topic must match your MoCap system's ROS\,2 output.
+
+\subsection{Pre-Flight Checklist}
+
+\begin{enumerate}
+    \item Charge both Crazyflie batteries fully.
+    \item Verify motion capture tracking for both drones (all rigid body markers visible).
+    \item Place drones at known starting positions within the arena.
+    \item Verify radio link: \texttt{cfclient} should show both drones.
+    \item Confirm value function files exist in \texttt{/workspace/data/value\_functions/}.
+    \item Clear the arena of people and obstacles not part of the experiment.
+    \item Brief the safety pilot on emergency procedures.
+\end{enumerate}
+
+\subsection{Launch Sequence}
+
+\begin{lstlisting}[style=bashstyle]
+# Terminal 1: Source workspace
+source /workspace/reach_avoid_ws/install/setup.bash
+
+# Terminal 2: Launch the hardware game
+ros2 launch reach_avoid_bringup hardware.launch.py \
+    attacker_mode:=scripted \
+    value_function_dir:=/workspace/data/value_functions/ \
+    defender_uri:=radio://0/80/2M/E7E7E7E701 \
+    attacker_uri:=radio://0/80/2M/E7E7E7E702 \
+    use_rviz:=true
+
+# Terminal 3: Arm the safety monitor
+ros2 service call /safety/arm std_srvs/srv/Trigger
+
+# Terminal 4: Command takeoff
+ros2 service call /hw/takeoff std_srvs/srv/Trigger
+
+# The defender controller will automatically begin tracking the attacker
+# once both drone states are being received.
+
+# Emergency landing (any terminal):
+ros2 service call /hw/land std_srvs/srv/Trigger
+\end{lstlisting}
+
+\subsection{Safety Monitor}
+
+The safety monitor node (\texttt{reach\_avoid\_hw/safety\_monitor\_node.py}) runs at 50\,Hz and checks:
+
+\begin{table}[h]
+\centering
+\caption{Safety checks and their parameters.}
+\begin{tabular}{lll}
+\toprule
+\textbf{Check} & \textbf{Condition} & \textbf{Default} \\
+\midrule
+Geofence & Position within room bounds $\pm$ margin & 0.5\,m margin \\
+Altitude floor & $z > z_\text{min}$ & 0.3\,m \\
+Altitude ceiling & $z < z_\text{max} - \text{margin}$ & 0.5\,m margin \\
+Defender speed & $\|v\| < U_D \times 1.1$ & 6.6\,m/s \\
+Attacker speed & $\|v\| < U_A \times 1.1$ & 3.3\,m/s \\
+Inter-drone distance & $\|p_D - p_A\| > d_\text{min}$ & 0.5\,m \\
+State watchdog & State received within timeout & 1.0\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Fail-safe behavior:} The safety monitor defaults to emergency landing on:
+\begin{itemize}[noitemsep]
+    \item Any safety violation
+    \item State data timeout (communication loss)
+    \item Any internal error (exception during safety check)
+\end{itemize}
+
+The emergency state \textbf{latches} --- once triggered, the monitor stays in emergency until manually rearmed via the \texttt{/safety/arm} service.
+
+\subsection{Crazyswarm2 Adapter}
+
+The adapter node bridges the reach-track controller to the Crazyflie hardware:
+
+\begin{itemize}
+    \item Subscribes to \texttt{/defender/cmd\_vel} (Twist) from the defender controller.
+    \item Forwards velocity commands to the Crazyflie via \texttt{cmdVelocityWorld}.
+    \item Reads motion capture poses from \texttt{/mocap/defender} and \texttt{/mocap/attacker}.
+    \item Publishes drone states (\texttt{/defender/state}, \texttt{/attacker/state}) and velocity estimates.
+    \item Provides takeoff (\texttt{/hw/takeoff}) and landing (\texttt{/hw/land}) services.
+\end{itemize}
+
+Velocity estimation is done via finite differences on motion capture position data. For more accurate velocity, consider using the Crazyflie's onboard state estimator.
+
+\subsection{Tuning for Real Hardware}
+
+\begin{warningbox}
+The value functions computed with the paper's speed parameters ($U_D^h = 6$\,m/s) may be too aggressive for indoor Crazyflie flights. Recommended adjustments for initial testing:
+\begin{itemize}[noitemsep]
+    \item Reduce \texttt{max\_speed\_horizontal} to 1.0--2.0\,m/s
+    \item Reduce \texttt{max\_speed\_vertical} to 0.5--1.0\,m/s
+    \item Increase \texttt{min\_inter\_drone\_distance} to 1.0\,m
+    \item Recompute value functions with the adjusted parameters
+\end{itemize}
+\end{warningbox}
+
+The proportional gains ($k_x$, $k_y$, $k_z$) model the Crazyflie's velocity response. Measure the actual step response of your drone and adjust these gains to match. A gain that is too high will cause the value function to overestimate the drone's agility; too low will make it too conservative.
+
+
+%=============================================================================
+\section{Troubleshooting}
+%=============================================================================
+
+\begin{description}[style=nextline, leftmargin=0.5cm]
+    \item[\texttt{Phi\_z} is all positive (no winning region)]
+    On coarse grids (dev preset), the invariant capture set $\mathcal{B}_z$ may be very small, causing $\Phi_z$ to remain positive everywhere. Use the \texttt{medium} or \texttt{paper} preset for meaningful results.
+
+    \item[\texttt{T\_capture} returns infinity]
+    Same root cause as above. The time slices never reach $\leq 0$ on coarse grids because $\mathcal{B}_z$ is too small as a target set.
+
+    \item[Gazebo crashes immediately]
+    Check that the NVIDIA container toolkit is installed and X11 forwarding is configured. Run \texttt{xhost +local:docker} before \texttt{docker-compose up}.
+
+    \item[PX4 SITL does not connect]
+    Ensure \texttt{MicroXRCEAgent} is running on UDP port 8888. The PX4 instance must be configured with the correct \texttt{PX4\_SIM\_MODEL=gz\_x500}.
+
+    \item[Defender hovers without moving]
+    The controller falls back to hover when value functions are not loaded. Check that the \texttt{value\_function\_dir} parameter points to a directory containing all required \texttt{.npz} files.
+
+    \item[Safety monitor triggers immediately]
+    Verify that motion capture is publishing valid poses. The watchdog triggers emergency if no state is received within 1\,s.
+
+    \item[\texttt{RegularGridInterpolator} bounds error]
+    States are clamped to grid bounds before interpolation. If you see this error, a clamping step is missing --- check that \texttt{np.clip} is applied before calling the interpolator.
+
+    \item[Value function NaN or Inf after solve]
+    Verify the initial value function (SDF) is finite everywhere. Check that grid domain bounds match the room dimensions in \texttt{game\_params.yaml}.
+\end{description}
+
+
+%=============================================================================
+\section{References}
+%=============================================================================
+
+\begin{enumerate}
+    \item M.~Bui, S.~Monckton, and M.~Chen, ``Reach-Avoid Differential Game with Reachability Analysis for UAVs --- A Decomposition Approach,'' \textit{arXiv preprint arXiv:2512.22793}, Dec.~2025.
+
+    \item \texttt{hj\_reachability}: \url{https://github.com/StanfordASL/hj_reachability} --- JAX-based Hamilton-Jacobi reachability library (v0.7.0).
+
+    \item PX4 Autopilot: \url{https://github.com/PX4/PX4-Autopilot} --- Open-source flight controller.
+
+    \item Crazyswarm2: \url{https://github.com/IMRCLab/crazyswarm2} --- ROS\,2 driver for Crazyflie drones.
+
+    \item Gazebo: \url{https://gazebosim.org/} --- Robotics simulation platform (Harmonic release).
+\end{enumerate}
+
+\end{document}
