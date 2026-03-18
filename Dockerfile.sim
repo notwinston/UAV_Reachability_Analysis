@@ -41,9 +41,18 @@ RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
     http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" \
     > /etc/apt/sources.list.d/ros2.list
 
+# Gazebo Harmonic + ros_gz for Harmonic (fixes "Unknown message type" bridge errors).
+# Default ros-humble-ros-gz targets Fortress; use OSRF repo for Harmonic.
+RUN curl -sSL https://packages.osrfoundation.org/gazebo.gpg \
+    -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] \
+    https://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" \
+    > /etc/apt/sources.list.d/gazebo-stable.list
+
 RUN apt-get update && apt-get install -y \
     ros-humble-desktop \
-    ros-humble-ros-gz \
+    gz-harmonic \
+    ros-humble-ros-gzharmonic \
     ros-humble-teleop-twist-keyboard \
     && rm -rf /var/lib/apt/lists/*
 

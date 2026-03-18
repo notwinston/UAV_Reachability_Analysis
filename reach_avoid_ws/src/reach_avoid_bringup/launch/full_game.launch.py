@@ -9,7 +9,7 @@ Includes the simulation.launch.py from SW-3 and adds:
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -29,11 +29,17 @@ def generate_launch_description():
 
     value_function_dir_arg = DeclareLaunchArgument(
         'value_function_dir',
-        default_value='/workspace/data/value_functions/',
+        default_value='/workspaces/ros2_ws/src/UAV_Reachability_Analysis/value_functions/',
         description='Path to directory containing value function .npz files',
     )
 
-    # Include simulation.launch.py from SW-3
+    game_params_arg = DeclareLaunchArgument(
+        'game_params_file',
+        default_value='/workspaces/ros2_ws/src/UAV_Reachability_Analysis/config/game_params.yaml',
+        description='Path to game_params.yaml',
+    )
+
+    # Include simulation.launch.py
     simulation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_pkg, 'launch', 'simulation.launch.py')
@@ -43,7 +49,23 @@ def generate_launch_description():
         }.items(),
     )
 
-    # Defender controller node
+    # Static TF: world frame for RViz (markers use frame_id="world")
+    static_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        arguments=['0', '0', '0', '0', '0', '0', 'world', 'map'],
+        name='world_to_map_tf',
+    )
+
+    # Defender controller node (use venv's scipy/numpy to avoid binary incompatibility)
+    venv_site = os.path.join(
+        '/workspaces/ros2_ws/src/UAV_Reachability_Analysis/.venv',
+        'lib', 'python3.10', 'site-packages'
+    )
+    defender_env = {}
+    if os.path.isdir(venv_site):
+        defender_env['PYTHONPATH'] = venv_site + (':' + os.environ.get('PYTHONPATH', '') if os.environ.get('PYTHONPATH') else '')
+
     defender_controller = Node(
         package='reach_avoid_controller',
         executable='defender_node',
@@ -56,8 +78,12 @@ def generate_launch_description():
             'margin_z_factor': 0.3,
             'margin_h_factor': 0.3,
         }],
+        additional_env=defender_env,
         output='screen',
     )
+
+    # Delay defender until after PX4 spawns and ground_truth_relay is publishing
+    delayed_defender = TimerAction(period=12.0, actions=[defender_controller])
 
     # Game visualization node
     game_viz = Node(
@@ -65,7 +91,7 @@ def generate_launch_description():
         executable='game_viz',
         name='game_viz',
         parameters=[{
-            'game_params_file': '/workspace/config/game_params.yaml',
+            'game_params_file': LaunchConfiguration('game_params_file'),
         }],
         output='screen',
     )
@@ -84,8 +110,10 @@ def generate_launch_description():
     return LaunchDescription([
         attacker_mode_arg,
         value_function_dir_arg,
+        game_params_arg,
         simulation_launch,
-        defender_controller,
+        static_tf,
+        delayed_defender,
         game_viz,
         rviz,
     ])

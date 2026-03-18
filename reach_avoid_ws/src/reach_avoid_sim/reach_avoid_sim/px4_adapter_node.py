@@ -18,6 +18,7 @@ def main(args=None):
             TrajectorySetpoint,
             VehicleCommand,
             VehicleOdometry,
+            VehicleStatus,
         )
 
         class PX4AdapterNode(Node):
@@ -29,9 +30,13 @@ def main(args=None):
                 # Parameters
                 self.declare_parameter('vehicle_id', 1)
                 self.declare_parameter('cmd_vel_topic', '/defender/cmd_vel')
+                self.declare_parameter('fmu_topic_prefix', '')
+                # fmu_topic_prefix: PX4 UXRCE namespace, e.g. 'defender' -> /defender/fmu/in/...
 
                 self.vehicle_id = self.get_parameter('vehicle_id').value
                 cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
+                prefix = self.get_parameter('fmu_topic_prefix').value
+                fmu_prefix = f'/{prefix}/' if prefix else '/'
 
                 # QoS for PX4 topics (best-effort, transient local)
                 qos_px4 = QoSProfile(
@@ -45,16 +50,22 @@ def main(args=None):
                 self.cmd_vel_sub = self.create_subscription(
                     Twist, cmd_vel_topic, self._cmd_vel_callback, 10
                 )
+                self.vehicle_status_sub = self.create_subscription(
+                    VehicleStatus,
+                    f'{fmu_prefix}fmu/out/vehicle_status',
+                    self._vehicle_status_callback,
+                    qos_px4,
+                )
 
-                # Publishers to PX4
+                # Publishers to PX4 (with optional namespace for multi-vehicle)
                 self.offboard_mode_pub = self.create_publisher(
-                    OffboardControlMode, '/fmu/in/offboard_control_mode', qos_px4
+                    OffboardControlMode, f'{fmu_prefix}fmu/in/offboard_control_mode', qos_px4
                 )
                 self.trajectory_pub = self.create_publisher(
-                    TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_px4
+                    TrajectorySetpoint, f'{fmu_prefix}fmu/in/trajectory_setpoint', qos_px4
                 )
                 self.vehicle_cmd_pub = self.create_publisher(
-                    VehicleCommand, '/fmu/in/vehicle_command', qos_px4
+                    VehicleCommand, f'{fmu_prefix}fmu/in/vehicle_command', qos_px4
                 )
 
                 # State
@@ -62,6 +73,8 @@ def main(args=None):
                 self._offboard_setpoint_count = 0
                 self._armed = False
                 self._offboard_engaged = False
+                self._px4_connected = False
+                self._last_arm_time = 0.0
 
                 # 20Hz heartbeat timer (offboard mode requires continuous commands)
                 self._timer = self.create_timer(0.05, self._timer_callback)
@@ -75,6 +88,12 @@ def main(args=None):
                 """Store latest velocity command."""
                 self._cmd_vel = msg
 
+            def _vehicle_status_callback(self, msg: VehicleStatus):
+                """Track PX4 connection and arming state."""
+                self._px4_connected = True
+                if msg.arming_state == VehicleStatus.ARMING_STATE_ARMED:
+                    self._armed = True
+
             def _timer_callback(self):
                 """20Hz heartbeat: publish offboard mode and velocity setpoints."""
                 # Always publish offboard control mode to maintain heartbeat
@@ -83,6 +102,10 @@ def main(args=None):
                 # Publish velocity setpoint (ENU -> NED conversion)
                 self._publish_velocity_setpoint()
 
+                # Wait for PX4 to connect before engaging offboard/arm
+                if not self._px4_connected:
+                    return
+
                 # Arming sequence: send enough offboard setpoints, then engage
                 if self._offboard_setpoint_count < 20:
                     self._offboard_setpoint_count += 1
@@ -90,8 +113,11 @@ def main(args=None):
                     self._engage_offboard_mode()
                     self._offboard_engaged = True
                 elif not self._armed:
-                    self._arm()
-                    self._armed = True
+                    # Retry arm every 2s until PX4 accepts (preflight may need time)
+                    now = self.get_clock().now().nanoseconds / 1e9
+                    if now - self._last_arm_time >= 2.0:
+                        self._arm()
+                        self._last_arm_time = now
 
             def _publish_offboard_control_mode(self):
                 """Publish offboard control mode requesting velocity control."""
