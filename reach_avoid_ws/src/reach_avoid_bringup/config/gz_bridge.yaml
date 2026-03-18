@@ -1,0 +1,19 @@
+# ros_gz_bridge config for reach_avoid_arena (Gazebo Harmonic)
+# PX4 spawns models as x500_1 (defender), x500_2 (attacker)
+- ros_topic_name: "/clock"
+  gz_topic_name: "/world/reach_avoid_arena/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/model/x500_1/pose"
+  gz_topic_name: "/world/reach_avoid_arena/model/x500_1/pose"
+  ros_type_name: "geometry_msgs/msg/PoseStamped"
+  gz_type_name: "gz.msgs.Pose"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/model/x500_2/pose"
+  gz_topic_name: "/world/reach_avoid_arena/model/x500_2/pose"
+  ros_type_name: "geometry_msgs/msg/PoseStamped"
+  gz_type_name: "gz.msgs.Pose"
+  direction: GZ_TO_ROS

@@ -31,9 +31,9 @@ def main(args=None):
             def __init__(self):
                 super().__init__('ground_truth_relay')
 
-                # Parameters
-                self.declare_parameter('defender_model_name', 'x500_defender')
-                self.declare_parameter('attacker_model_name', 'x500_attacker')
+                # Parameters (PX4 spawns as x500_1, x500_2; instance 1=defender, 2=attacker)
+                self.declare_parameter('defender_model_name', 'x500_1')
+                self.declare_parameter('attacker_model_name', 'x500_2')
                 self.declare_parameter('world_name', 'reach_avoid_arena')
                 self.declare_parameter('publish_rate', 50.0)
 
