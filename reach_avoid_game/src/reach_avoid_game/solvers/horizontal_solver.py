@@ -203,6 +203,15 @@ def solve_horizontal_reach_avoid(
     # Time horizon: dev=10s, paper=22s
     T = 10.0 if preset == "dev" else 22.0
     n_steps = 50 if preset == "dev" else 100
+    # Cap time steps to limit memory: (n_steps+1) * grid_size * 8 bytes
+    grid_size = 1
+    for s in grid.states.shape[:-1]:
+        grid_size *= s
+    max_mem_bytes = 1_500_000_000  # 3 GB limit for solver output
+    max_steps = max(8, int(max_mem_bytes / (grid_size * 8)) - 1)
+    if n_steps > max_steps:
+        print(f"  Reducing time steps from {n_steps} to {max_steps} (memory limit)")
+        n_steps = max_steps
 
     if obstacle_values is not None:
         # Reach-avoid: reach target while avoiding obstacles
@@ -283,6 +292,15 @@ def solve_horizontal_max_distance(
     # Per paper Section V, use T=2.5s (V_h_T may not converge)
     T = 2.5
     n_steps = 50
+    # Cap time steps to limit memory
+    grid_size = 1
+    for s in grid.states.shape[:-1]:
+        grid_size *= s
+    max_mem_bytes = 1_500_000_000  # 3 GB limit for solver output
+    max_steps = max(8, int(max_mem_bytes / (grid_size * 8)) - 1)
+    if n_steps > max_steps:
+        print(f"  Reducing time steps from {n_steps} to {max_steps} (memory limit)")
+        n_steps = max_steps
 
     # Max-over-time postprocessor for worst-case tracking
     solver_settings = hj.SolverSettings.with_accuracy(
@@ -506,6 +524,15 @@ def solve_horizontal_max_distance_6d(
     # Per paper Section V, use T=2.5s
     T = 2.5
     n_steps = 50
+    # Cap time steps to limit memory
+    grid_size = 1
+    for s in grid.states.shape[:-1]:
+        grid_size *= s
+    max_mem_bytes = 1_500_000_000
+    max_steps = max(8, int(max_mem_bytes / (grid_size * 8)) - 1)
+    if n_steps > max_steps:
+        print(f"  Reducing time steps from {n_steps} to {max_steps} (memory limit)")
+        n_steps = max_steps
 
     # Max-over-time postprocessor
     solver_settings = hj.SolverSettings.with_accuracy(

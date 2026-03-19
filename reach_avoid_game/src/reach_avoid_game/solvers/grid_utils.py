@@ -88,10 +88,10 @@ def create_horizontal_game_grid(config: GameConfig) -> hj.Grid:
     Domain:
       x_D, x_A in [room.x_min, room.x_max]
       y_D, y_A in [room.y_min, room.y_max]
-      v_D_x, v_D_y in [-U_D_h, U_D_h]
+      v_D_x in [-U_D_h, U_D_h], v_D_y in [-U_D_h, U_D_h]
 
-    Dev grid: positions and velocities use coarse resolution, attacker
-    positions use minimal resolution to keep 6D grid tractable.
+    Grid resolution per dimension is set independently to match the paper:
+      Paper: 85 x 45 x 8 x 7 x 85 x 45 (position x, y, vel x, vel y, att x, att y)
 
     Args:
         config: Game configuration (preset already applied)
@@ -102,18 +102,14 @@ def create_horizontal_game_grid(config: GameConfig) -> hj.Grid:
     h = config.grid.horizontal
     u_d_h = config.defender.max_speed_horizontal
 
-    # For 6D grid, use different resolutions per dimension to stay tractable:
-    # Defender position: moderate resolution
-    # Defender velocity: fewer points
-    # Attacker position: minimal resolution (coarsest)
-    n_def_pos_x = h.coarse_pos_points
-    n_def_pos_y = h.coarse_vel_points   # fewer y points (room is narrower)
-    n_vel = h.coarse_vel_points
-    # Attacker positions: very coarse for dev to keep grid small
-    n_att_x = min(4, h.coarse_pos_points)
-    n_att_y = min(4, h.coarse_vel_points)
-
-    shape = (n_def_pos_x, n_def_pos_y, n_vel, n_vel, n_att_x, n_att_y)
+    shape = (
+        h.game_x_points,       # x_D
+        h.game_y_points,       # y_D
+        h.game_vel_x_points,   # v_D_x
+        h.game_vel_y_points,   # v_D_y
+        h.game_x_points,       # x_A (same resolution as x_D)
+        h.game_y_points,       # y_A (same resolution as y_D)
+    )
 
     domain = hj.sets.Box(
         lo=jnp.array([
@@ -148,8 +144,8 @@ def create_horizontal_relative_grid(config: GameConfig) -> hj.Grid:
     Dimensions: [x_rel, y_rel, v_D_x, v_D_y]
       where x_rel = x_D - x_A, y_rel = y_D - y_A
     Domain:
-      x_rel in [-(x_max-x_min), (x_max-x_min)]
-      y_rel in [-(y_max-y_min), (y_max-y_min)]
+      x_rel, y_rel in [-rel_pos_range, rel_pos_range]
+        Paper uses [-3, 3] (matching capture distance d_h=3m)
       v_D_x, v_D_y in [-U_D_h, U_D_h]
 
     Args:
@@ -160,17 +156,13 @@ def create_horizontal_relative_grid(config: GameConfig) -> hj.Grid:
     """
     h = config.grid.horizontal
     u_d_h = config.defender.max_speed_horizontal
-    x_range = config.room.x_max - config.room.x_min
-    y_range = config.room.y_max - config.room.y_min
+    r = h.rel_pos_range
 
-    n_pos = h.coarse_pos_points
-    n_vel = h.coarse_vel_points
-
-    shape = (n_pos, n_pos, n_vel, n_vel)
+    shape = (h.rel_pos_points, h.rel_pos_points, h.rel_vel_points, h.rel_vel_points)
 
     domain = hj.sets.Box(
-        lo=jnp.array([-x_range, -y_range, -u_d_h, -u_d_h]),
-        hi=jnp.array([x_range, y_range, u_d_h, u_d_h]),
+        lo=jnp.array([-r, -r, -u_d_h, -u_d_h]),
+        hi=jnp.array([r, r, u_d_h, u_d_h]),
     )
 
     return hj.Grid.from_lattice_parameters_and_boundary_conditions(
@@ -198,9 +190,8 @@ def create_attacker_reaching_grid(config: GameConfig) -> hj.Grid:
         hj_reachability Grid object
     """
     h = config.grid.horizontal
-    n_pos = h.coarse_pos_points
 
-    shape = (n_pos, n_pos)
+    shape = (h.reach_x_points, h.reach_y_points)
 
     domain = hj.sets.Box(
         lo=jnp.array([config.room.x_min, config.room.y_min]),

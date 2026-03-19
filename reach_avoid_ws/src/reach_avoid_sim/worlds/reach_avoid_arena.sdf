@@ -15,6 +15,25 @@
       <real_time_factor>1.0</real_time_factor>
     </physics>
 
+    <!-- Gazebo system plugins (required for sensor simulation) -->
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact">
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu">
+    </plugin>
+    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure">
+    </plugin>
+    <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer">
+    </plugin>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
     <!-- Sun light -->
     <light type="directional" name="sun">
       <cast_shadows>true</cast_shadows>

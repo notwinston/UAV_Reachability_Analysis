@@ -75,10 +75,18 @@ class Vertical3DGridConfig:
 
 @dataclass
 class HorizontalGridConfig:
-    coarse_pos_points: int = 21
-    coarse_vel_points: int = 11
-    fine_pos_points: int = 45
-    fine_vel_points: int = 21
+    # 4D relative grid (V_h_T, B_h): [x_rel, y_rel, v_D_x, v_D_y]
+    rel_pos_points: int = 21       # x_rel and y_rel resolution
+    rel_vel_points: int = 11       # v_D_x and v_D_y resolution
+    rel_pos_range: float = 6.0     # x_rel, y_rel domain: [-range, range] meters
+    # 6D absolute grid (Phi_h): [x_D, y_D, v_D_x, v_D_y, x_A, y_A]
+    game_x_points: int = 9         # x_D and x_A resolution
+    game_y_points: int = 7         # y_D and y_A resolution
+    game_vel_x_points: int = 5     # v_D_x resolution
+    game_vel_y_points: int = 5     # v_D_y resolution
+    # 2D attacker reaching grid: [x_A, y_A]
+    reach_x_points: int = 21       # x_A resolution
+    reach_y_points: int = 13       # y_A resolution
 
 
 @dataclass
@@ -155,16 +163,25 @@ class GameConfig:
             config.grid_presets = data["grid_presets"]
 
         # Apply preset overrides to grid config
-        if config.grid_preset and config.grid_preset in config.grid_presets:
-            preset = config.grid_presets[config.grid_preset]
-            if "vertical" in preset:
-                for k, v in preset["vertical"].items():
-                    setattr(config.grid.vertical, k, v)
-            if "vertical_3d" in preset:
-                for k, v in preset["vertical_3d"].items():
-                    setattr(config.grid.vertical_3d, k, v)
-            if "horizontal" in preset:
-                for k, v in preset["horizontal"].items():
-                    setattr(config.grid.horizontal, k, v)
+        config.apply_preset(config.grid_preset)
 
         return config
+
+    def apply_preset(self, preset_name: str) -> None:
+        """Apply a grid preset, overriding current grid settings.
+
+        Args:
+            preset_name: Name of preset (e.g., "dev", "medium", "paper")
+        """
+        if preset_name and preset_name in self.grid_presets:
+            preset = self.grid_presets[preset_name]
+            if "vertical" in preset:
+                for k, v in preset["vertical"].items():
+                    setattr(self.grid.vertical, k, v)
+            if "vertical_3d" in preset:
+                for k, v in preset["vertical_3d"].items():
+                    setattr(self.grid.vertical_3d, k, v)
+            if "horizontal" in preset:
+                for k, v in preset["horizontal"].items():
+                    setattr(self.grid.horizontal, k, v)
+            self.grid_preset = preset_name

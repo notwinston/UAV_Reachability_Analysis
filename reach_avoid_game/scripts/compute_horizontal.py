@@ -8,6 +8,7 @@ Runs the full horizontal computation pipeline (Paper order):
 """
 
 import argparse
+import gc
 import time
 
 from reach_avoid_game.config import GameConfig
@@ -33,6 +34,7 @@ def main():
     args = parser.parse_args()
 
     config = GameConfig.from_yaml(args.config)
+    config.apply_preset(args.preset)
 
     print(f"Computing horizontal value functions with '{args.preset}' preset")
     print(f"Output directory: {args.output_dir}")
@@ -57,6 +59,9 @@ def main():
     print(f"  phi_A_reach computed in {t3 - t2:.1f}s")
     print()
 
+    # Free JAX/numpy memory from previous solves before the large 6D solve
+    gc.collect()
+
     # Step 4: Phi_h with B_h feedback (Paper Eq. 39)
     v_h_t_data = load_value_function(v_h_t_path)
     phi_h_path = solve_horizontal_reach_avoid(
@@ -69,6 +74,7 @@ def main():
 
     # Optional: 6D V_h extension
     if args.include_6d:
+        gc.collect()
         from reach_avoid_game.solvers.horizontal_solver import solve_horizontal_max_distance_6d
         v_h_6d_path = solve_horizontal_max_distance_6d(config, preset=args.preset, output_dir=args.output_dir)
         t5 = time.time()

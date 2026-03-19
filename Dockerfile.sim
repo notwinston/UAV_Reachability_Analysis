@@ -73,6 +73,8 @@ RUN git clone --depth 1 --recursive https://github.com/PX4/PX4-Autopilot.git /op
     && make px4_sitl gz_x500 \
     || echo "PX4 SITL build attempted - may require GPU runtime for full Gazebo support"
 
+ENV PX4_AUTOPILOT=/opt/PX4-Autopilot
+
 # ---- px4_msgs and px4_ros_com ----
 RUN mkdir -p /opt/px4_ros_ws/src \
     && cd /opt/px4_ros_ws/src \
@@ -99,6 +101,7 @@ WORKDIR /home/simuser/ws
 # ---- Copy workspace ----
 COPY --chown=simuser:simuser reach_avoid_ws/src /home/simuser/ws/src
 COPY --chown=simuser:simuser config /home/simuser/ws/config
+COPY --chown=simuser:simuser data/value_functions /home/simuser/ws/data/value_functions
 
 # ---- Build workspace ----
 RUN . /opt/ros/humble/setup.sh \

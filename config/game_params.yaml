@@ -41,10 +41,15 @@ grid:
     v_dz_points: 21
     z_a_points: 41
   horizontal:
-    coarse_pos_points: 21
-    coarse_vel_points: 11
-    fine_pos_points: 45
-    fine_vel_points: 21
+    rel_pos_points: 21
+    rel_vel_points: 11
+    rel_pos_range: 6.0
+    game_x_points: 9
+    game_y_points: 7
+    game_vel_x_points: 5
+    game_vel_y_points: 5
+    reach_x_points: 21
+    reach_y_points: 13
   solver:
     accuracy: medium
     time_horizon: 15.0
@@ -59,10 +64,15 @@ grid_presets:
       v_dz_points: 10
       z_a_points: 24
     horizontal:
-      coarse_pos_points: 21
-      coarse_vel_points: 11
-      fine_pos_points: 21
-      fine_vel_points: 11
+      rel_pos_points: 21
+      rel_vel_points: 11
+      rel_pos_range: 6.0
+      game_x_points: 9
+      game_y_points: 7
+      game_vel_x_points: 5
+      game_vel_y_points: 5
+      reach_x_points: 21
+      reach_y_points: 13
   medium:
     vertical:
       z_rel_points: 120
@@ -72,10 +82,15 @@ grid_presets:
       v_dz_points: 50
       z_a_points: 120
     horizontal:
-      coarse_pos_points: 43
-      coarse_vel_points: 6
-      fine_pos_points: 43
-      fine_vel_points: 6
+      rel_pos_points: 30
+      rel_vel_points: 38
+      rel_pos_range: 6.0
+      game_x_points: 15
+      game_y_points: 10
+      game_vel_x_points: 6
+      game_vel_y_points: 6
+      reach_x_points: 43
+      reach_y_points: 23
   paper:
     vertical:
       z_rel_points: 240
@@ -85,7 +100,12 @@ grid_presets:
       v_dz_points: 100
       z_a_points: 240
     horizontal:
-      coarse_pos_points: 85
-      coarse_vel_points: 8
-      fine_pos_points: 85
-      fine_vel_points: 8
+      rel_pos_points: 45
+      rel_vel_points: 55
+      rel_pos_range: 3.0
+      game_x_points: 15
+      game_y_points: 10
+      game_vel_x_points: 6
+      game_vel_y_points: 6
+      reach_x_points: 85
+      reach_y_points: 45

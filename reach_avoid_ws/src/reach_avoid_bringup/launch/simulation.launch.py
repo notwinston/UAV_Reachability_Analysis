@@ -17,6 +17,7 @@ def get_px4_path():
     if os.environ.get("PX4_AUTOPILOT") and os.path.isdir(os.environ["PX4_AUTOPILOT"]):
         return os.environ["PX4_AUTOPILOT"]
     for candidate in [
+        "/opt/PX4-Autopilot",
         "/workspaces/ros2_ws/src/PX4-Autopilot",
         os.path.join(os.path.expanduser("~"), "PX4-Autopilot"),
     ]:
@@ -125,6 +126,13 @@ def generate_launch_description():
             'PX4_PARAM_COM_ARM_MAG_STR': '0',
             'PX4_PARAM_EKF2_MAG_CHECK': '0',
             'PX4_PARAM_EKF2_MAG_GATE': '10',  # Lenient mag innovation gate (default 3) for sim
+            # Indoor SITL: no GPS, use barometer for height, allow arming without GPS
+            'PX4_PARAM_COM_ARM_WO_GPS': '1',
+            'PX4_PARAM_SYS_HAS_GPS': '0',
+            'PX4_PARAM_EKF2_GPS_CTRL': '0',
+            'PX4_PARAM_EKF2_HGT_REF': '2',   # Barometer height reference
+            'PX4_PARAM_EKF2_BARO_CTRL': '1',
+            'PX4_PARAM_EKF2_MAG_TYPE': '1',   # Automatic mag fusion type
         })
         # Do NOT set PX4_GZ_MODEL_NAME - PX4 will spawn models as x500_1, x500_2
         # Arena: 8x8m, walls at x=0,8 and y=0,8. Obstacle x=[3,4], y=[2,6]. Target x=[6,8], y=[3,5]
