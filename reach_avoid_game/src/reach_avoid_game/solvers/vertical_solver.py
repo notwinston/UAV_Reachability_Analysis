@@ -148,6 +148,15 @@ def solve_vertical_reach_avoid(
     # Time array: solve backward from T=0 to T=-time_horizon
     T = config.grid.solver.time_horizon
     n_steps = config.grid.solver.time_steps
+    # Cap time steps to limit memory: (n_steps+1) * grid_size * 8 bytes
+    grid_size = 1
+    for s in grid.states.shape[:-1]:
+        grid_size *= s
+    max_mem_bytes = 1_500_000_000  # 1.5 GB limit for solver output
+    max_steps = max(8, int(max_mem_bytes / (grid_size * 8)) - 1)
+    if n_steps > max_steps:
+        print(f"  Reducing time steps from {n_steps} to {max_steps} (memory limit)")
+        n_steps = max_steps
     times = jnp.linspace(0, -T, n_steps + 1)
 
     # Solve

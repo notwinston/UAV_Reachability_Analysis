@@ -30,8 +30,8 @@ px4:
 
 # Gazebo model names
 gazebo:
-  defender_model: x500_defender
-  attacker_model: x500_attacker
+  defender_model: x500_1
+  attacker_model: x500_2
   world_name: reach_avoid_arena
 
 # Control rates (Hz)

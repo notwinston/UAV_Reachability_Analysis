@@ -29,6 +29,7 @@ def main():
     args = parser.parse_args()
 
     config = GameConfig.from_yaml(args.config)
+    config.apply_preset(args.preset)
 
     print(f"Computing vertical value functions with '{args.preset}' preset")
     print(f"Output directory: {args.output_dir}")

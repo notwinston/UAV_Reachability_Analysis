@@ -15,10 +15,31 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
+def _find_path(candidates, fallback):
+    """Return the first existing path from candidates, or fallback."""
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return fallback
+
+
 def generate_launch_description():
     # Package directories
     bringup_pkg = get_package_share_directory('reach_avoid_bringup')
     viz_pkg = get_package_share_directory('reach_avoid_viz')
+
+    # Discover value_function_dir and game_params_file across common locations
+    vf_default = _find_path([
+        os.path.join(os.path.expanduser('~'), 'ws', 'data', 'value_functions'),
+        '/workspace/data/value_functions',
+        '/workspaces/ros2_ws/src/UAV_Reachability_Analysis/value_functions',
+    ], '/workspace/data/value_functions')
+
+    gp_default = _find_path([
+        os.path.join(os.path.expanduser('~'), 'ws', 'config', 'game_params.yaml'),
+        '/workspace/config/game_params.yaml',
+        '/workspaces/ros2_ws/src/UAV_Reachability_Analysis/config/game_params.yaml',
+    ], '/workspace/config/game_params.yaml')
 
     # Launch arguments
     attacker_mode_arg = DeclareLaunchArgument(
@@ -29,13 +50,13 @@ def generate_launch_description():
 
     value_function_dir_arg = DeclareLaunchArgument(
         'value_function_dir',
-        default_value='/workspaces/ros2_ws/src/UAV_Reachability_Analysis/value_functions/',
+        default_value=vf_default,
         description='Path to directory containing value function .npz files',
     )
 
     game_params_arg = DeclareLaunchArgument(
         'game_params_file',
-        default_value='/workspaces/ros2_ws/src/UAV_Reachability_Analysis/config/game_params.yaml',
+        default_value=gp_default,
         description='Path to game_params.yaml',
     )
 
@@ -58,13 +79,16 @@ def generate_launch_description():
     )
 
     # Defender controller node (use venv's scipy/numpy to avoid binary incompatibility)
-    venv_site = os.path.join(
-        '/workspaces/ros2_ws/src/UAV_Reachability_Analysis/.venv',
-        'lib', 'python3.10', 'site-packages'
-    )
+    venv_candidates = [
+        os.path.join(os.path.expanduser('~'), 'ws', '.venv', 'lib', 'python3.10', 'site-packages'),
+        '/workspace/.venv/lib/python3.10/site-packages',
+        '/workspaces/ros2_ws/src/UAV_Reachability_Analysis/.venv/lib/python3.10/site-packages',
+    ]
     defender_env = {}
-    if os.path.isdir(venv_site):
-        defender_env['PYTHONPATH'] = venv_site + (':' + os.environ.get('PYTHONPATH', '') if os.environ.get('PYTHONPATH') else '')
+    for venv_site in venv_candidates:
+        if os.path.isdir(venv_site):
+            defender_env['PYTHONPATH'] = venv_site + (':' + os.environ.get('PYTHONPATH', '') if os.environ.get('PYTHONPATH') else '')
+            break
 
     defender_controller = Node(
         package='reach_avoid_controller',
