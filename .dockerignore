@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+.git
+*.egg-info
+build/
+log/
+install/
+data/plots
+data/simulations
+docs/
+tests/
+*.pdf

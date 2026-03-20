@@ -23,6 +23,7 @@ setup(
         'console_scripts': [
             'px4_adapter = reach_avoid_sim.px4_adapter_node:main',
             'ground_truth_relay = reach_avoid_sim.ground_truth_relay_node:main',
+            'kinematic_sim = reach_avoid_sim.kinematic_sim_node:main',
         ],
     },
 )

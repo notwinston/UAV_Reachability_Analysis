@@ -50,22 +50,42 @@ def main(args=None):
                 self.cmd_vel_sub = self.create_subscription(
                     Twist, cmd_vel_topic, self._cmd_vel_callback, 10
                 )
-                self.vehicle_status_sub = self.create_subscription(
-                    VehicleStatus,
-                    f'{fmu_prefix}fmu/out/vehicle_status',
-                    self._vehicle_status_callback,
-                    qos_px4,
-                )
+                # Try both vehicle_status and vehicle_status_v3 (PX4 version varies)
+                for suffix in ['vehicle_status', 'vehicle_status_v3']:
+                    self.create_subscription(
+                        VehicleStatus,
+                        f'{fmu_prefix}fmu/out/{suffix}',
+                        self._vehicle_status_callback,
+                        QoSProfile(
+                            reliability=ReliabilityPolicy.BEST_EFFORT,
+                            durability=DurabilityPolicy.VOLATILE,
+                            history=HistoryPolicy.KEEP_LAST,
+                            depth=1,
+                        ),
+                    )
 
-                # Publishers to PX4 (with optional namespace for multi-vehicle)
+                # Publishers to PX4 (volatile QoS to match PX4's DDS config)
+                qos_pub = QoSProfile(
+                    reliability=ReliabilityPolicy.BEST_EFFORT,
+                    durability=DurabilityPolicy.VOLATILE,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1,
+                )
                 self.offboard_mode_pub = self.create_publisher(
-                    OffboardControlMode, f'{fmu_prefix}fmu/in/offboard_control_mode', qos_px4
+                    OffboardControlMode, f'{fmu_prefix}fmu/in/offboard_control_mode', qos_pub
                 )
                 self.trajectory_pub = self.create_publisher(
-                    TrajectorySetpoint, f'{fmu_prefix}fmu/in/trajectory_setpoint', qos_px4
+                    TrajectorySetpoint, f'{fmu_prefix}fmu/in/trajectory_setpoint', qos_pub
+                )
+                # VehicleCommand needs RELIABLE QoS for PX4 to receive it
+                qos_cmd = QoSProfile(
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.VOLATILE,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1,
                 )
                 self.vehicle_cmd_pub = self.create_publisher(
-                    VehicleCommand, f'{fmu_prefix}fmu/in/vehicle_command', qos_px4
+                    VehicleCommand, f'{fmu_prefix}fmu/in/vehicle_command', qos_cmd
                 )
 
                 # State
@@ -75,6 +95,7 @@ def main(args=None):
                 self._offboard_engaged = False
                 self._px4_connected = False
                 self._last_arm_time = 0.0
+                self._startup_count = 0  # Fallback: assume connected after enough ticks (15s = 300 ticks at 20Hz)
 
                 # 20Hz heartbeat timer (offboard mode requires continuous commands)
                 self._timer = self.create_timer(0.05, self._timer_callback)
@@ -102,16 +123,25 @@ def main(args=None):
                 # Publish velocity setpoint (ENU -> NED conversion)
                 self._publish_velocity_setpoint()
 
-                # Wait for PX4 to connect before engaging offboard/arm
-                if not self._px4_connected:
+                # Wait for PX4 to connect (or assume connected after 15s = 300 ticks)
+                # GPS needs time to converge before arming
+                self._startup_count += 1
+                if not self._px4_connected and self._startup_count < 300:
                     return
+                if not self._px4_connected and self._startup_count == 300:
+                    self.get_logger().warn('No vehicle_status received, proceeding with arming anyway')
+                    self._px4_connected = True
 
-                # Arming sequence: send enough offboard setpoints, then engage
-                if self._offboard_setpoint_count < 20:
+                # Arming sequence: setpoints -> offboard mode -> wait -> arm
+                if self._offboard_setpoint_count < 40:
                     self._offboard_setpoint_count += 1
                 elif not self._offboard_engaged:
                     self._engage_offboard_mode()
                     self._offboard_engaged = True
+                    self._offboard_setpoint_count = 0  # Reset to count post-offboard setpoints
+                elif self._offboard_setpoint_count < 20:
+                    # Wait 1 second after offboard mode before arming
+                    self._offboard_setpoint_count += 1
                 elif not self._armed:
                     # Retry arm every 2s until PX4 accepts (preflight may need time)
                     now = self.get_clock().now().nanoseconds / 1e9
@@ -133,18 +163,26 @@ def main(args=None):
             def _publish_velocity_setpoint(self):
                 """Convert ENU velocity command to NED and publish.
 
-                ROS2 ENU: x=east, y=north, z=up
+                Game/Gazebo ENU: x=east, y=north, z=up
                 PX4 NED:  x=north, y=east, z=down
+                Velocities are clamped to prevent motor saturation in simulation.
                 """
                 msg = TrajectorySetpoint()
 
+                # Only forward actual velocity after armed; send zero during warmup
+                if self._armed:
+                    max_h = 1.5
+                    max_v = 1.0
+                    vx = max(-max_h, min(max_h, self._cmd_vel.linear.x))
+                    vy = max(-max_h, min(max_h, self._cmd_vel.linear.y))
+                    vz = max(-max_v, min(max_v, self._cmd_vel.linear.z))
+                else:
+                    vx, vy, vz = 0.0, 0.0, 0.0
+
                 # ENU -> NED coordinate conversion
-                # ENU x (east) -> NED y (east)
-                # ENU y (north) -> NED x (north)
-                # ENU z (up) -> NED z (down, negated)
-                msg.velocity[0] = self._cmd_vel.linear.y   # NED x = ENU north
-                msg.velocity[1] = self._cmd_vel.linear.x   # NED y = ENU east
-                msg.velocity[2] = -self._cmd_vel.linear.z   # NED z = -ENU up
+                msg.velocity[0] = vy    # NED x (north) = ENU y (north)
+                msg.velocity[1] = vx    # NED y (east) = ENU x (east)
+                msg.velocity[2] = -vz   # NED z (down) = -ENU z (up)
 
                 # Set NaN for position/acceleration to indicate velocity-only control
                 msg.position[0] = float('nan')
@@ -153,8 +191,8 @@ def main(args=None):
                 msg.acceleration[0] = float('nan')
                 msg.acceleration[1] = float('nan')
                 msg.acceleration[2] = float('nan')
-                msg.yaw = float('nan')
-                msg.yawspeed = self._cmd_vel.angular.z
+                msg.yaw = 0.0  # Hold heading at 0 (north)
+                msg.yawspeed = 0.0
 
                 msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
                 self.trajectory_pub.publish(msg)
@@ -165,7 +203,7 @@ def main(args=None):
                 msg.param1 = param1
                 msg.param2 = param2
                 msg.command = command
-                msg.target_system = self.vehicle_id
+                msg.target_system = self.vehicle_id + 1  # PX4 instance i has MAV_SYS_ID=i+1
                 msg.target_component = 1
                 msg.source_system = 1
                 msg.source_component = 1
@@ -174,12 +212,13 @@ def main(args=None):
                 self.vehicle_cmd_pub.publish(msg)
 
             def _arm(self):
-                """Send arm command."""
+                """Send force-arm command (bypasses preflight health checks for SITL)."""
                 self._publish_vehicle_command(
                     VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
                     param1=1.0,
+                    param2=21196.0,  # Force arm magic number
                 )
-                self.get_logger().info('Arm command sent')
+                self.get_logger().info('Force arm command sent')
 
             def _engage_offboard_mode(self):
                 """Send offboard mode command."""
