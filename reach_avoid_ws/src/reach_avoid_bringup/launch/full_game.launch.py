@@ -10,6 +10,8 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.conditions import IfCondition
+from launch.substitutions import EnvironmentVariable, PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -120,15 +122,16 @@ def generate_launch_description():
         output='screen',
     )
 
-    # RViz2 with game visualization config
+    # RViz2 with game visualization config (only when DISPLAY is available)
     rviz_config = os.path.join(viz_pkg, 'config', 'game_viz.rviz')
+    has_display = bool(os.environ.get('DISPLAY'))
     rviz = Node(
         package='rviz2',
         executable='rviz2',
         name='rviz2',
         arguments=['-d', rviz_config],
         output='screen',
-        condition=None,
+        condition=IfCondition(str(has_display).lower()),
     )
 
     return LaunchDescription([

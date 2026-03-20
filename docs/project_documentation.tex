@@ -681,6 +681,8 @@ These are \textbf{not} installed in the development environment. Use Docker.
 
 \subsection{Docker Setup}
 
+The Docker container \textbf{auto-launches} the full game when started --- no manual intervention is required:
+
 \begin{lstlisting}[style=bashstyle]
 # Step 1: Build the simulation Docker image
 docker build -f Dockerfile.sim -t reach-avoid-sim .
@@ -688,9 +690,18 @@ docker build -f Dockerfile.sim -t reach-avoid-sim .
 # Step 2: Allow X11 display forwarding (for Gazebo GUI)
 xhost +local:docker
 
-# Step 3: Start the simulation container
+# Step 3: Start the simulation (auto-launches full_game.launch.py)
 docker-compose -f docker-compose.sim.yml up
 \end{lstlisting}
+
+The container's \texttt{CMD} runs \texttt{ros2 launch reach\_avoid\_bringup full\_game.launch.py}, which starts Gazebo, PX4 SITL instances, all adapters, and both controllers in sequence. The startup timeline is:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{$t = 0$\,s:} Gazebo opens with the 45$\times$25\,m arena, ros\_gz\_bridge and XRCE-DDS agent start
+    \item \textbf{$t = 6$\,s:} PX4 SITL instances spawn x500 drones (defender at $(5, 12.5, 3)$, attacker at $(5, 20, 3)$)
+    \item \textbf{$t = 18$\,s:} PX4 adapters, ground truth relay, and attacker controller activate (EKF2 convergence delay)
+    \item \textbf{$t \approx 30$\,s:} Defender controller loads value functions and begins reach-track algorithm
+\end{enumerate}
 
 The Docker image (\texttt{Dockerfile.sim}) installs:
 \begin{itemize}[noitemsep]
@@ -710,12 +721,19 @@ The \texttt{docker-compose.sim.yml} mounts:
     \item X11 socket for Gazebo GUI display
 \end{itemize}
 
+\begin{infobox}
+The container runs non-interactively (no \texttt{stdin\_open} or \texttt{tty}). To debug, exec into the running container: \texttt{docker exec -it reach-avoid-sim bash}.
+\end{infobox}
+
 \subsection{Launch Commands}
 
-Once inside the Docker container:
+The Docker container auto-launches \texttt{full\_game.launch.py}. For manual launches or debugging, exec into the container:
 
 \begin{lstlisting}[style=bashstyle]
-# Source the workspace
+# Exec into the running container
+docker exec -it reach-avoid-sim bash
+
+# Source the workspace (done automatically by entrypoint)
 source /home/simuser/ws/install/setup.bash
 
 # Launch simulation only (Gazebo + PX4 + adapters + attacker)
@@ -731,6 +749,27 @@ ros2 launch reach_avoid_bringup full_game.launch.py \
 ros2 launch reach_avoid_bringup attacker_only.launch.py
 \end{lstlisting}
 
+\subsubsection{Verifying the Simulation}
+
+Once the simulation is running, verify that all components are active:
+
+\begin{lstlisting}[style=bashstyle]
+# Exec into the running container
+docker exec -it reach-avoid-sim bash
+
+# Check game status
+ros2 topic echo /game/status --once
+
+# Verify both drones are receiving commands (non-zero velocities)
+ros2 topic echo /defender/cmd_vel --once
+ros2 topic echo /attacker/cmd_vel --once
+
+# List all active topics
+ros2 topic list
+\end{lstlisting}
+
+Expected behavior: the attacker navigates waypoints toward the target at $(41.5, 12.5, 10)$, routing around the obstacle below $y = 5$. The defender intercepts using the reach-track algorithm. The game ends when the defender captures the attacker (cylindrical capture zone: horizontal distance $\leq 3$\,m and vertical distance $\leq 1$\,m) or the attacker reaches the target region.
+
 \textbf{Attacker modes:}
 \begin{itemize}[noitemsep]
     \item \texttt{scripted} --- follows predefined waypoints toward target
@@ -741,14 +780,19 @@ ros2 launch reach_avoid_bringup attacker_only.launch.py
 
 \subsection{Gazebo World}
 
-The simulation world (\texttt{reach\_avoid\_arena.sdf}) defines:
+The simulation world (\texttt{reach\_avoid\_arena.sdf}) matches the paper's game parameters exactly:
 \begin{itemize}[noitemsep]
-    \item $8 \times 8 \times 4$\,m room with four walls
-    \item Red obstacle box at $x \in [3,4]$, $y \in [2,6]$\,m
-    \item Green transparent target region at $x \in [6,8]$, $y \in [3,5]$\,m
+    \item $45 \times 25 \times 20$\,m room with four walls (matching \texttt{game\_params.yaml})
+    \item Red obstacle box at $x \in [15,20]$, $y \in [5,20]$\,m (center $(17.5, 12.5, 10)$, size $5 \times 15 \times 20$)
+    \item Green transparent target region at $x \in [38,45]$, $y \in [10,15]$\,m (center $(41.5, 12.5, 10)$, size $7 \times 5 \times 20$)
+    \item Ground plane $60 \times 40$\,m, sun at $(22.5, 12.5, 30)$
     \item DART physics at 1\,kHz, real-time factor 1.0
-    \item Two PX4 x500 quadrotor models (defender and attacker)
+    \item Two PX4 x500 quadrotor models (defender at $(5, 12.5, 3)$, attacker at $(5, 20, 3)$)
 \end{itemize}
+
+\begin{infobox}
+The arena dimensions must match the room bounds in \texttt{game\_params.yaml} (45$\times$25$\times$20\,m) and the value function domain. If the SDF arena is smaller than the value function grid, drones will spawn at positions that map to the wrong value function states, and the reach-avoid algorithms will produce incorrect controls.
+\end{infobox}
 
 \subsection{Simulation Parameters}
 
@@ -756,10 +800,24 @@ The file \texttt{reach\_avoid\_bringup/config/simulation\_params.yaml} configure
 \begin{itemize}[noitemsep]
     \item Topic names for defender/attacker state, velocity, and commands
     \item PX4 vehicle IDs (defender=1, attacker=2) and MAVLink ports
-    \item Gazebo model names (\texttt{x500\_defender}, \texttt{x500\_attacker})
+    \item Gazebo model names (\texttt{x500\_1}, \texttt{x500\_2})
     \item Control rates: PX4 heartbeat 20\,Hz, ground truth 50\,Hz, control 20\,Hz
     \item Default attacker waypoints navigating around the obstacle to the target
 \end{itemize}
+
+The attacker waypoints are configured for the 45\,m arena and route around the obstacle (which spans $y \in [5,20]$) by going below $y = 5$:
+
+\begin{lstlisting}[style=yamlstyle, title=\textbf{Attacker waypoints (simulation\_params.yaml)}]
+attacker_waypoints:
+  - [5.0, 12.5, 10.0]     # Starting area (near west wall)
+  - [12.0, 12.5, 10.0]    # Approach obstacle
+  - [12.0, 3.0, 10.0]     # Go around obstacle (below y=5)
+  - [25.0, 3.0, 10.0]     # Past obstacle
+  - [25.0, 12.5, 10.0]    # Re-center
+  - [41.5, 12.5, 10.0]    # Target center
+\end{lstlisting}
+
+The attacker controller in \texttt{simulation.launch.py} is configured with \texttt{target\_x}$=$41.5, \texttt{target\_y}$=$12.5, \texttt{target\_z}$=$10.0 (center of the target region) and \texttt{max\_speed}$=$2.0\,m/s (below the attacker's theoretical maximum of 3.0\,m/s for stability).
 
 
 %=============================================================================
@@ -951,6 +1009,12 @@ The proportional gains ($k_x$, $k_y$, $k_z$) model the Crazyflie's velocity resp
 
     \item[Defender hovers without moving]
     The controller falls back to hover when value functions are not loaded. Check that the \texttt{value\_function\_dir} parameter points to a directory containing all required \texttt{.npz} files.
+
+    \item[Drones hover in place but never execute reach-avoid algorithms]
+    Three common causes: (1)~the Docker container opened an interactive bash shell instead of auto-launching --- verify \texttt{CMD} in \texttt{Dockerfile.sim} is \texttt{ros2 launch reach\_avoid\_bringup full\_game.launch.py}; (2)~the SDF arena dimensions don't match \texttt{game\_params.yaml} --- the arena must be 45$\times$25$\times$20\,m, not the old 8$\times$8$\times$4\,m; (3)~spawn positions and waypoints are outside the value function domain.
+
+    \item[Arena/value function dimension mismatch]
+    The SDF arena, \texttt{game\_params.yaml}, spawn positions in \texttt{simulation.launch.py}, and attacker waypoints in \texttt{simulation\_params.yaml} must all use consistent dimensions. The paper uses 45$\times$25$\times$20\,m. If any component uses different dimensions (e.g., the old 8\,m arena), drones will spawn at positions that map incorrectly in the value function grid.
 
     \item[Safety monitor triggers immediately]
     Verify that motion capture is publishing valid poses. The watchdog triggers emergency if no state is received within 1\,s.

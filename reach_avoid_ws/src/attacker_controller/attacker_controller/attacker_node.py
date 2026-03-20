@@ -30,7 +30,7 @@ def main(args=None):
                 self.declare_parameter('target_x', 7.0)
                 self.declare_parameter('target_y', 4.0)
                 self.declare_parameter('target_z', 2.0)
-                self.declare_parameter('waypoints', [])
+                self.declare_parameter('waypoints', [0.0])
 
                 self._mode = self.get_parameter('mode').value
                 self._max_speed = self.get_parameter('max_speed').value

@@ -66,11 +66,14 @@ def generate_launch_description():
         px4_plugins,
     ]))
     gazebo_env['GZ_SIM_SERVER_CONFIG_PATH'] = px4_server_config
+    # Run Gazebo headless (-s server-only) when no DISPLAY is available
+    gz_cmd = ['gz', 'sim', '-r']
+    if not os.environ.get('DISPLAY'):
+        gz_cmd.append('-s')  # headless server mode
+    gz_cmd.append(LaunchConfiguration('world_file'))
+
     gazebo = ExecuteProcess(
-        cmd=[
-            'gz', 'sim', '-r',
-            LaunchConfiguration('world_file'),
-        ],
+        cmd=gz_cmd,
         output='screen',
         additional_env=gazebo_env,
     )
@@ -121,29 +124,40 @@ def generate_launch_description():
                 os.environ.get('GZ_SIM_SYSTEM_PLUGIN_PATH', ''),
                 px4_plugins,
             ])),
-            # Relax SITL preflight: no GCS, no mag interference, relax heading/mag checks
-            'PX4_PARAM_NAV_DLL_ACT': '0',
-            'PX4_PARAM_COM_ARM_MAG_STR': '0',
-            'PX4_PARAM_EKF2_MAG_CHECK': '0',
-            'PX4_PARAM_EKF2_MAG_GATE': '10',  # Lenient mag innovation gate (default 3) for sim
-            # Indoor SITL: no GPS, use barometer for height, allow arming without GPS
+            # --- GPS and EKF2 ---
+            'PX4_PARAM_SYS_HAS_GPS': '1',
             'PX4_PARAM_COM_ARM_WO_GPS': '1',
-            'PX4_PARAM_SYS_HAS_GPS': '0',
-            'PX4_PARAM_EKF2_GPS_CTRL': '0',
-            'PX4_PARAM_EKF2_HGT_REF': '2',   # Barometer height reference
+            'PX4_PARAM_EKF2_GPS_CTRL': '7',
+            'PX4_PARAM_EKF2_HGT_REF': '1',
             'PX4_PARAM_EKF2_BARO_CTRL': '1',
-            'PX4_PARAM_EKF2_MAG_TYPE': '1',   # Automatic mag fusion type
+            # --- Magnetometer (keep enabled for heading, relax checks) ---
+            'PX4_PARAM_EKF2_MAG_TYPE': '1',     # Automatic mag fusion
+            'PX4_PARAM_EKF2_MAG_CHECK': '0',
+            'PX4_PARAM_COM_ARM_MAG_STR': '0',
+            # --- Disable ALL failsafes for SITL ---
+            'PX4_PARAM_CBRK_SUPPLY_CHK': '894281',
+            'PX4_PARAM_CBRK_FLIGHTTERM': '121212',
+            'PX4_PARAM_COM_RCL_EXCEPT': '4',
+            'PX4_PARAM_NAV_DLL_ACT': '0',
+            'PX4_PARAM_NAV_RCL_ACT': '0',
+            'PX4_PARAM_COM_OBL_RC_ACT': '0',
+            'PX4_PARAM_COM_DISARM_PRFLT': '-1',
+            'PX4_PARAM_COM_FLT_TIME_MAX': '0',
+            'PX4_PARAM_FD_FAIL_P': '0',
+            'PX4_PARAM_FD_FAIL_R': '0',
+            'PX4_PARAM_FD_ACT': '0',
+            'PX4_PARAM_COM_IMB_PROP_ACT': '0',
         })
         # Do NOT set PX4_GZ_MODEL_NAME - PX4 will spawn models as x500_1, x500_2
-        # Arena: 8x8m, walls at x=0,8 and y=0,8. Obstacle x=[3,4], y=[2,6]. Target x=[6,8], y=[3,5]
+        # Arena: 45x25m, walls at x=0,45 and y=0,25. Obstacle x=[15,20], y=[5,20]. Target x=[38,45], y=[10,15]
         defender_env = {
             **env,
-            'PX4_GZ_MODEL_POSE': '1.5,1.5,0.5',
+            'PX4_GZ_MODEL_POSE': '5.0,12.5,3.0',
             'PX4_UXRCE_DDS_NS': 'defender',
         }
         attacker_env = {
             **env,
-            'PX4_GZ_MODEL_POSE': '1.5,6.5,0.5',
+            'PX4_GZ_MODEL_POSE': '5.0,20.0,3.0',
             'PX4_UXRCE_DDS_NS': 'attacker',
         }
         return [
@@ -205,17 +219,29 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Attacker waypoints: flat list [x1,y1,z1, x2,y2,z2, ...] navigating around
+    # the obstacle (x=[15,20], y=[5,20]) by going below y=5.
+    attacker_waypoints = [
+        5.0, 12.5, 10.0,    # Starting area
+        12.0, 12.5, 10.0,   # Approach obstacle
+        12.0, 3.0, 10.0,    # Go around obstacle (below y=5)
+        25.0, 3.0, 10.0,    # Past obstacle
+        25.0, 12.5, 10.0,   # Re-center
+        41.5, 12.5, 10.0,   # Target center
+    ]
+
     attacker_controller = Node(
         package='attacker_controller',
         executable='attacker_node',
         name='attacker_controller',
         parameters=[{
             'mode': LaunchConfiguration('attacker_mode'),
-            'max_speed': 0.5,
+            'max_speed': 2.0,
             'speed_fraction': 0.8,
-            'target_x': 7.0,
-            'target_y': 4.0,
-            'target_z': 2.0,
+            'target_x': 41.5,
+            'target_y': 12.5,
+            'target_z': 10.0,
+            'waypoints': attacker_waypoints,
         }],
         output='screen',
     )

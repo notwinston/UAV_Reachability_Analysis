@@ -1,182 +1,137 @@
 """Ground truth relay ROS2 node.
 
-Subscribes to Gazebo ground truth poses (via ros_gz_bridge) and republishes
-as ROS2 PoseStamped/TwistStamped for defender and attacker state topics.
-Computes velocity via finite differences when Gazebo does not provide it.
+Reads drone positions from PX4's vehicle_local_position DDS topic
+and converts to absolute Gazebo-frame coordinates by adding the known
+spawn position offset. PX4 local_position is relative to takeoff point.
 """
-
-import math
 
 def main(args=None):
     try:
         import rclpy
         from rclpy.node import Node
-        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-        from geometry_msgs.msg import PoseStamped, TwistStamped, Twist
-        from builtin_interfaces.msg import Time
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+        from geometry_msgs.msg import PoseStamped, TwistStamped
 
         try:
-            from ros_gz_interfaces.msg import EntityWrench
-            _HAS_GZ_INTERFACES = True
+            from px4_msgs.msg import VehicleLocalPosition
+            _HAS_PX4_MSGS = True
         except ImportError:
-            _HAS_GZ_INTERFACES = False
+            _HAS_PX4_MSGS = False
 
         class GroundTruthRelayNode(Node):
-            """Relays Gazebo ground truth to game state topics.
-
-            Subscribes to model pose topics from ros_gz_bridge and publishes
-            normalized PoseStamped and TwistStamped messages for each drone.
-            """
-
             def __init__(self):
                 super().__init__('ground_truth_relay')
 
-                # Parameters (PX4 spawns as x500_1, x500_2; instance 1=defender, 2=attacker)
                 self.declare_parameter('defender_model_name', 'x500_1')
                 self.declare_parameter('attacker_model_name', 'x500_2')
                 self.declare_parameter('world_name', 'reach_avoid_arena')
                 self.declare_parameter('publish_rate', 50.0)
+                # Spawn positions (must match simulation.launch.py PX4_GZ_MODEL_POSE)
+                self.declare_parameter('defender_spawn_x', 5.0)
+                self.declare_parameter('defender_spawn_y', 12.5)
+                self.declare_parameter('defender_spawn_z', 3.0)
+                self.declare_parameter('attacker_spawn_x', 5.0)
+                self.declare_parameter('attacker_spawn_y', 20.0)
+                self.declare_parameter('attacker_spawn_z', 3.0)
 
                 self._defender_model = self.get_parameter('defender_model_name').value
                 self._attacker_model = self.get_parameter('attacker_model_name').value
-                world_name = self.get_parameter('world_name').value
                 publish_rate = self.get_parameter('publish_rate').value
 
-                # Publishers
-                self.defender_pose_pub = self.create_publisher(
-                    PoseStamped, '/defender/state', 10
-                )
-                self.defender_vel_pub = self.create_publisher(
-                    TwistStamped, '/defender/velocity', 10
-                )
-                self.attacker_pose_pub = self.create_publisher(
-                    PoseStamped, '/attacker/state', 10
-                )
-                self.attacker_vel_pub = self.create_publisher(
-                    TwistStamped, '/attacker/velocity', 10
-                )
+                self._defender_spawn = [
+                    self.get_parameter('defender_spawn_x').value,
+                    self.get_parameter('defender_spawn_y').value,
+                    self.get_parameter('defender_spawn_z').value,
+                ]
+                self._attacker_spawn = [
+                    self.get_parameter('attacker_spawn_x').value,
+                    self.get_parameter('attacker_spawn_y').value,
+                    self.get_parameter('attacker_spawn_z').value,
+                ]
 
-                # Subscribe to Gazebo model pose topics via ros_gz_bridge
-                # The bridge typically exposes /model/<name>/pose as PoseStamped
-                qos_gz = QoSProfile(
+                # Publishers
+                self.defender_pose_pub = self.create_publisher(PoseStamped, '/defender/state', 10)
+                self.defender_vel_pub = self.create_publisher(TwistStamped, '/defender/velocity', 10)
+                self.attacker_pose_pub = self.create_publisher(PoseStamped, '/attacker/state', 10)
+                self.attacker_vel_pub = self.create_publisher(TwistStamped, '/attacker/velocity', 10)
+
+                qos_px4 = QoSProfile(
                     reliability=ReliabilityPolicy.BEST_EFFORT,
+                    durability=DurabilityPolicy.VOLATILE,
                     history=HistoryPolicy.KEEP_LAST,
                     depth=1,
                 )
 
-                self.create_subscription(
-                    PoseStamped,
-                    f'/model/{self._defender_model}/pose',
-                    self._defender_pose_callback,
-                    qos_gz,
-                )
-                self.create_subscription(
-                    PoseStamped,
-                    f'/model/{self._attacker_model}/pose',
-                    self._attacker_pose_callback,
-                    qos_gz,
-                )
+                if _HAS_PX4_MSGS:
+                    self.create_subscription(
+                        VehicleLocalPosition,
+                        '/defender/fmu/out/vehicle_local_position_v1',
+                        self._defender_cb, qos_px4)
+                    self.create_subscription(
+                        VehicleLocalPosition,
+                        '/attacker/fmu/out/vehicle_local_position_v1',
+                        self._attacker_cb, qos_px4)
 
-                # State for finite-difference velocity estimation
-                self._defender_prev_pose = None
-                self._defender_prev_time = None
-                self._attacker_prev_pose = None
-                self._attacker_prev_time = None
+                    self.get_logger().info('Using px4_msgs VehicleLocalPosition for ground truth')
+                else:
+                    self.get_logger().error('px4_msgs not available — cannot relay ground truth')
 
-                # Timer for periodic publishing (ensures consistent rate)
                 self._latest_defender_pose = None
                 self._latest_attacker_pose = None
+                self._latest_defender_vel = None
+                self._latest_attacker_vel = None
                 self._timer = self.create_timer(1.0 / publish_rate, self._publish_timer)
 
                 self.get_logger().info(
                     f'Ground truth relay started: '
-                    f'defender={self._defender_model}, '
-                    f'attacker={self._attacker_model}'
-                )
+                    f'defender={self._defender_model} spawn={self._defender_spawn}, '
+                    f'attacker={self._attacker_model} spawn={self._attacker_spawn}')
 
-            def _defender_pose_callback(self, msg: PoseStamped):
-                """Store latest defender pose from Gazebo."""
-                self._latest_defender_pose = msg
+            def _convert(self, msg, spawn):
+                """Convert PX4 local position (NED, relative to spawn) to absolute Gazebo frame.
 
-            def _attacker_pose_callback(self, msg: PoseStamped):
-                """Store latest attacker pose from Gazebo."""
-                self._latest_attacker_pose = msg
+                PX4 NED: x=North, y=East, z=Down (relative to takeoff/home)
+                Gazebo ENU: x=East, y=North, z=Up
+                Spawn is in Gazebo ENU coordinates.
+                """
+                pose = PoseStamped()
+                pose.header.frame_id = 'world'
+                # NED -> ENU: swap x<->y, negate z
+                pose.pose.position.x = spawn[0] + float(msg.y)   # Gazebo x (East) = spawn_east + NED_y (East)
+                pose.pose.position.y = spawn[1] + float(msg.x)   # Gazebo y (North) = spawn_north + NED_x (North)
+                pose.pose.position.z = spawn[2] + float(-msg.z)   # Gazebo z (Up) = spawn_up + (-NED_z) (Up)
+
+                vel = TwistStamped()
+                vel.header.frame_id = 'world'
+                vel.twist.linear.x = float(msg.vy)   # ENU vx (East) = NED vy (East)
+                vel.twist.linear.y = float(msg.vx)   # ENU vy (North) = NED vx (North)
+                vel.twist.linear.z = float(-msg.vz)   # ENU vz (Up) = -NED vz (Down)
+                return pose, vel
+
+            def _defender_cb(self, msg):
+                if msg.z_valid or msg.timestamp > 0:
+                    self._latest_defender_pose, self._latest_defender_vel = \
+                        self._convert(msg, self._defender_spawn)
+
+            def _attacker_cb(self, msg):
+                if msg.z_valid or msg.timestamp > 0:
+                    self._latest_attacker_pose, self._latest_attacker_vel = \
+                        self._convert(msg, self._attacker_spawn)
 
             def _publish_timer(self):
-                """Publish state and velocity at fixed rate."""
                 now = self.get_clock().now()
-
                 if self._latest_defender_pose is not None:
-                    # Publish pose
-                    pose_msg = PoseStamped()
-                    pose_msg.header.stamp = now.to_msg()
-                    pose_msg.header.frame_id = 'world'
-                    pose_msg.pose = self._latest_defender_pose.pose
-                    self.defender_pose_pub.publish(pose_msg)
-
-                    # Compute and publish velocity via finite differences
-                    vel_msg = self._compute_velocity(
-                        self._latest_defender_pose,
-                        self._defender_prev_pose,
-                        self._defender_prev_time,
-                        now,
-                    )
-                    if vel_msg is not None:
-                        self.defender_vel_pub.publish(vel_msg)
-
-                    self._defender_prev_pose = self._latest_defender_pose
-                    self._defender_prev_time = now
-
+                    self._latest_defender_pose.header.stamp = now.to_msg()
+                    self.defender_pose_pub.publish(self._latest_defender_pose)
+                    if self._latest_defender_vel:
+                        self._latest_defender_vel.header.stamp = now.to_msg()
+                        self.defender_vel_pub.publish(self._latest_defender_vel)
                 if self._latest_attacker_pose is not None:
-                    # Publish pose
-                    pose_msg = PoseStamped()
-                    pose_msg.header.stamp = now.to_msg()
-                    pose_msg.header.frame_id = 'world'
-                    pose_msg.pose = self._latest_attacker_pose.pose
-                    self.attacker_pose_pub.publish(pose_msg)
-
-                    # Compute and publish velocity via finite differences
-                    vel_msg = self._compute_velocity(
-                        self._latest_attacker_pose,
-                        self._attacker_prev_pose,
-                        self._attacker_prev_time,
-                        now,
-                    )
-                    if vel_msg is not None:
-                        self.attacker_vel_pub.publish(vel_msg)
-
-                    self._attacker_prev_pose = self._latest_attacker_pose
-                    self._attacker_prev_time = now
-
-            def _compute_velocity(self, current_pose, prev_pose, prev_time, current_time):
-                """Compute velocity via finite differences on position.
-
-                Returns TwistStamped or None if no previous data.
-                """
-                if prev_pose is None or prev_time is None:
-                    return None
-
-                dt_ns = (current_time.nanoseconds - prev_time.nanoseconds)
-                if dt_ns <= 0:
-                    return None
-                dt = dt_ns / 1e9
-
-                vel_msg = TwistStamped()
-                vel_msg.header.stamp = current_time.to_msg()
-                vel_msg.header.frame_id = 'world'
-
-                # Linear velocity from position differences
-                vel_msg.twist.linear.x = (
-                    current_pose.pose.position.x - prev_pose.pose.position.x
-                ) / dt
-                vel_msg.twist.linear.y = (
-                    current_pose.pose.position.y - prev_pose.pose.position.y
-                ) / dt
-                vel_msg.twist.linear.z = (
-                    current_pose.pose.position.z - prev_pose.pose.position.z
-                ) / dt
-
-                return vel_msg
+                    self._latest_attacker_pose.header.stamp = now.to_msg()
+                    self.attacker_pose_pub.publish(self._latest_attacker_pose)
+                    if self._latest_attacker_vel:
+                        self._latest_attacker_vel.header.stamp = now.to_msg()
+                        self.attacker_vel_pub.publish(self._latest_attacker_vel)
 
         rclpy.init(args=args)
         node = GroundTruthRelayNode()

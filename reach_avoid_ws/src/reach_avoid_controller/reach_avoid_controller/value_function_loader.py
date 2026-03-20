@@ -34,18 +34,24 @@ except ImportError:
     def load_value_function(path):
         path = Path(path)
         with np.load(path, allow_pickle=True) as npz:
-            params_raw = npz["params"]
-            if params_raw.ndim == 0:
-                params = params_raw.item()
-            else:
-                params = dict(params_raw)
+            # params field is a pickled dict that may reference numpy._core
+            # (saved with numpy 2.x). Gracefully handle if unpickling fails.
+            try:
+                params_raw = npz["params"]
+                if params_raw.ndim == 0:
+                    params = params_raw.item()
+                else:
+                    params = dict(params_raw)
+            except (ModuleNotFoundError, ImportError):
+                logger.warning("Could not unpickle params from %s (numpy version mismatch), using defaults", path)
+                params = {}
             return ValueFunctionData(
                 values=npz["values"],
                 grid_min=npz["grid_min"],
                 grid_max=npz["grid_max"],
                 grid_shape=tuple(npz["grid_shape"]),
                 params=params,
-                description=str(npz["description"]),
+                description=str(npz.get("description", "unknown")),
             )
 
 

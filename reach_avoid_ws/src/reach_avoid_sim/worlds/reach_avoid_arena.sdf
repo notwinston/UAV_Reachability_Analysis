@@ -1,12 +1,22 @@
 <?xml version="1.0" ?>
 <!--
   Reach-Avoid Arena World for Gazebo Harmonic
-  Room: 8m x 8m x 4m (from game_params.yaml)
-  Obstacle: box at x=[3,4], y=[2,6], z=[0,4]
-  Target region: green transparent box at x=[6,8], y=[3,5]
+  Room: 45m x 25m x 20m (from game_params.yaml)
+  Obstacle: box at x=[15,20], y=[5,20], z=[0,20]
+  Target region: green transparent box at x=[38,45], y=[10,15]
 -->
 <sdf version="1.9">
   <world name="reach_avoid_arena">
+
+    <!-- Spherical coordinates: required for GPS (navsat) sensor to produce valid lat/lon -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397742</latitude_deg>
+      <longitude_deg>8.545594</longitude_deg>
+      <elevation>488.0</elevation>
+      <heading_deg>0</heading_deg>
+    </spherical_coordinates>
 
     <!-- Physics configuration -->
     <physics name="1kHz" type="dart">
@@ -30,6 +40,8 @@
     </plugin>
     <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer">
     </plugin>
+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat">
+    </plugin>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>
@@ -37,7 +49,7 @@
     <!-- Sun light -->
     <light type="directional" name="sun">
       <cast_shadows>true</cast_shadows>
-      <pose>4 4 10 0 0 0</pose>
+      <pose>22.5 12.5 30 0 0 0</pose>
       <diffuse>0.8 0.8 0.8 1</diffuse>
       <specular>0.2 0.2 0.2 1</specular>
       <attenuation>
@@ -57,7 +69,7 @@
           <geometry>
             <plane>
               <normal>0 0 1</normal>
-              <size>20 20</size>
+              <size>60 40</size>
             </plane>
           </geometry>
         </collision>
@@ -65,7 +77,7 @@
           <geometry>
             <plane>
               <normal>0 0 1</normal>
-              <size>20 20</size>
+              <size>60 40</size>
             </plane>
           </geometry>
           <material>
@@ -79,16 +91,16 @@
     <!-- Wall: South (y=0), along x-axis -->
     <model name="wall_south">
       <static>true</static>
-      <pose>4 0 2 0 0 0</pose>
+      <pose>22.5 0 10 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
-            <box><size>8 0.1 4</size></box>
+            <box><size>45 0.1 20</size></box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>8 0.1 4</size></box>
+            <box><size>45 0.1 20</size></box>
           </geometry>
           <material>
             <ambient>0.7 0.7 0.7 1</ambient>
@@ -98,19 +110,19 @@
       </link>
     </model>
 
-    <!-- Wall: North (y=8), along x-axis -->
+    <!-- Wall: North (y=25), along x-axis -->
     <model name="wall_north">
       <static>true</static>
-      <pose>4 8 2 0 0 0</pose>
+      <pose>22.5 25 10 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
-            <box><size>8 0.1 4</size></box>
+            <box><size>45 0.1 20</size></box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>8 0.1 4</size></box>
+            <box><size>45 0.1 20</size></box>
           </geometry>
           <material>
             <ambient>0.7 0.7 0.7 1</ambient>
@@ -123,16 +135,16 @@
     <!-- Wall: West (x=0), along y-axis -->
     <model name="wall_west">
       <static>true</static>
-      <pose>0 4 2 0 0 0</pose>
+      <pose>0 12.5 10 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
-            <box><size>0.1 8 4</size></box>
+            <box><size>0.1 25 20</size></box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>0.1 8 4</size></box>
+            <box><size>0.1 25 20</size></box>
           </geometry>
           <material>
             <ambient>0.7 0.7 0.7 1</ambient>
@@ -142,19 +154,19 @@
       </link>
     </model>
 
-    <!-- Wall: East (x=8), along y-axis -->
+    <!-- Wall: East (x=45), along y-axis -->
     <model name="wall_east">
       <static>true</static>
-      <pose>8 4 2 0 0 0</pose>
+      <pose>45 12.5 10 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
-            <box><size>0.1 8 4</size></box>
+            <box><size>0.1 25 20</size></box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>0.1 8 4</size></box>
+            <box><size>0.1 25 20</size></box>
           </geometry>
           <material>
             <ambient>0.7 0.7 0.7 1</ambient>
@@ -166,21 +178,21 @@
 
     <!--
       Obstacle: box from game_params.yaml
-      x_min=3, x_max=4, y_min=2, y_max=6, z_min=0, z_max=4
-      Center: (3.5, 4.0, 2.0), Size: (1.0, 4.0, 4.0)
+      x_min=15, x_max=20, y_min=5, y_max=20, z_min=0, z_max=20
+      Center: (17.5, 12.5, 10.0), Size: (5.0, 15.0, 20.0)
     -->
     <model name="obstacle_1">
       <static>true</static>
-      <pose>3.5 4.0 2.0 0 0 0</pose>
+      <pose>17.5 12.5 10.0 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
-            <box><size>1.0 4.0 4.0</size></box>
+            <box><size>5.0 15.0 20.0</size></box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>1.0 4.0 4.0</size></box>
+            <box><size>5.0 15.0 20.0</size></box>
           </geometry>
           <material>
             <ambient>0.8 0.2 0.2 1</ambient>
@@ -192,17 +204,17 @@
 
     <!--
       Target region visual marker (green transparent)
-      x_min=6, x_max=8, y_min=3, y_max=5
-      Center: (7.0, 4.0, 0.05), Size: (2.0, 2.0, 0.1) - flat marker on ground
+      x_min=38, x_max=45, y_min=10, y_max=15
+      Center: (41.5, 12.5, 0.01), Size: (7.0, 5.0, 0.02) - flat marker on ground
       Also a tall transparent volume for visibility
     -->
     <model name="target_region_ground">
       <static>true</static>
-      <pose>7.0 4.0 0.01 0 0 0</pose>
+      <pose>41.5 12.5 0.01 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
-            <box><size>2.0 2.0 0.02</size></box>
+            <box><size>7.0 5.0 0.02</size></box>
           </geometry>
           <material>
             <ambient>0.0 0.8 0.0 0.5</ambient>
@@ -214,11 +226,11 @@
 
     <model name="target_region_volume">
       <static>true</static>
-      <pose>7.0 4.0 2.0 0 0 0</pose>
+      <pose>41.5 12.5 10.0 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
-            <box><size>2.0 2.0 4.0</size></box>
+            <box><size>7.0 5.0 20.0</size></box>
           </geometry>
           <material>
             <ambient>0.0 0.8 0.0 0.15</ambient>

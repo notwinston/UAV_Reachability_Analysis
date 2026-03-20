@@ -9,7 +9,7 @@ FROM ubuntu:22.04 AS base
 ENV DEBIAN_FRONTEND=noninteractive
 ENV ROS_DISTRO=humble
 
-# ---- System dependencies ----
+# ---- Base system dependencies (needed to add repos) ----
 RUN apt-get update && apt-get install -y \
     curl \
     wget \
@@ -17,14 +17,6 @@ RUN apt-get update && apt-get install -y \
     lsb-release \
     software-properties-common \
     ca-certificates \
-    git \
-    build-essential \
-    cmake \
-    python3 \
-    python3-pip \
-    python3-colcon-common-extensions \
-    python3-rosdep \
-    python3-vcstool \
     sudo \
     locales \
     && locale-gen en_US en_US.UTF-8 \
@@ -34,7 +26,7 @@ RUN apt-get update && apt-get install -y \
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 
-# ---- ROS2 Humble ----
+# ---- Add ROS2 + Gazebo repos (must come before installing ROS/colcon packages) ----
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
     -o /usr/share/keyrings/ros-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
@@ -49,10 +41,19 @@ RUN curl -sSL https://packages.osrfoundation.org/gazebo.gpg \
     https://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" \
     > /etc/apt/sources.list.d/gazebo-stable.list
 
+# ---- Install everything (ROS2 repo is now available) ----
 RUN apt-get update && apt-get install -y \
+    git \
+    build-essential \
+    cmake \
+    python3 \
+    python3-pip \
+    python3-colcon-common-extensions \
+    python3-rosdep \
+    python3-vcstool \
     ros-humble-desktop \
     gz-harmonic \
-    ros-humble-ros-gzharmonic \
+    ros-humble-ros-gz \
     ros-humble-teleop-twist-keyboard \
     && rm -rf /var/lib/apt/lists/*
 
@@ -70,10 +71,17 @@ RUN git clone --depth 1 https://github.com/eProsima/Micro-XRCE-DDS-Agent.git /op
 RUN git clone --depth 1 --recursive https://github.com/PX4/PX4-Autopilot.git /opt/PX4-Autopilot \
     && cd /opt/PX4-Autopilot \
     && bash Tools/setup/ubuntu.sh --no-sim-tools \
-    && make px4_sitl gz_x500 \
-    || echo "PX4 SITL build attempted - may require GPU runtime for full Gazebo support"
+    && DONT_RUN=1 make px4_sitl_default \
+    && ls build/px4_sitl_default/bin/px4 \
+    && chmod -R a+rw /opt/PX4-Autopilot/build/px4_sitl_default/rootfs \
+    && mkdir -p /opt/PX4-Autopilot/build/px4_sitl_default/rootfs/1 \
+    && mkdir -p /opt/PX4-Autopilot/build/px4_sitl_default/rootfs/2 \
+    && chmod -R a+rw /opt/PX4-Autopilot/build/px4_sitl_default/rootfs
 
 ENV PX4_AUTOPILOT=/opt/PX4-Autopilot
+# Make px4_msgs always importable (needed by ground_truth_relay)
+ENV PYTHONPATH="/opt/px4_ros_ws/install/px4_msgs/local/lib/python3.10/dist-packages:/opt/px4_ros_ws/install/px4_ros_com/local/lib/python3.10/dist-packages:${PYTHONPATH}"
+ENV AMENT_PREFIX_PATH="/opt/px4_ros_ws/install/px4_msgs:/opt/px4_ros_ws/install/px4_ros_com:${AMENT_PREFIX_PATH}"
 
 # ---- px4_msgs and px4_ros_com ----
 RUN mkdir -p /opt/px4_ros_ws/src \
@@ -82,14 +90,13 @@ RUN mkdir -p /opt/px4_ros_ws/src \
     && git clone --depth 1 https://github.com/PX4/px4_ros_com.git \
     && cd /opt/px4_ros_ws \
     && . /opt/ros/humble/setup.sh \
-    && colcon build --symlink-install \
-    && rm -rf /opt/px4_ros_ws/log /opt/px4_ros_ws/build
+    && colcon build \
+    && rm -rf /opt/px4_ros_ws/log /opt/px4_ros_ws/src
 
 # ---- Python dependencies ----
-RUN pip3 install --no-cache-dir \
-    scipy \
-    numpy \
-    pyyaml
+# Note: system numpy (1.x from apt) is kept as-is to avoid breaking ROS2.
+# The value_function_loader handles numpy 2.x-saved files gracefully.
+RUN pip3 install --no-cache-dir scipy pyyaml
 
 # ---- Create user ----
 RUN useradd -m -u 1000 -s /bin/bash simuser \
@@ -107,8 +114,7 @@ COPY --chown=simuser:simuser data/value_functions /home/simuser/ws/data/value_fu
 RUN . /opt/ros/humble/setup.sh \
     && . /opt/px4_ros_ws/install/setup.sh \
     && cd /home/simuser/ws \
-    && colcon build --symlink-install \
-    || echo "Workspace build attempted - some packages may need runtime dependencies"
+    && colcon build --symlink-install
 
 # ---- Entrypoint ----
 COPY --chown=simuser:simuser <<'ENTRYPOINT_SCRIPT' /home/simuser/entrypoint.sh
@@ -127,4 +133,4 @@ ENTRYPOINT_SCRIPT
 RUN chmod +x /home/simuser/entrypoint.sh
 
 ENTRYPOINT ["/home/simuser/entrypoint.sh"]
-CMD ["bash"]
+CMD ["ros2", "launch", "reach_avoid_bringup", "full_game.launch.py"]
