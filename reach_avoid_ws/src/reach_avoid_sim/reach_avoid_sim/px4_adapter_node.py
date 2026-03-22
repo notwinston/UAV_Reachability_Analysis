@@ -50,19 +50,27 @@ def main(args=None):
                 self.cmd_vel_sub = self.create_subscription(
                     Twist, cmd_vel_topic, self._cmd_vel_callback, 10
                 )
+                qos_sub = QoSProfile(
+                    reliability=ReliabilityPolicy.BEST_EFFORT,
+                    durability=DurabilityPolicy.VOLATILE,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1,
+                )
                 # Try both vehicle_status and vehicle_status_v3 (PX4 version varies)
                 for suffix in ['vehicle_status', 'vehicle_status_v3']:
                     self.create_subscription(
                         VehicleStatus,
                         f'{fmu_prefix}fmu/out/{suffix}',
                         self._vehicle_status_callback,
-                        QoSProfile(
-                            reliability=ReliabilityPolicy.BEST_EFFORT,
-                            durability=DurabilityPolicy.VOLATILE,
-                            history=HistoryPolicy.KEEP_LAST,
-                            depth=1,
-                        ),
+                        qos_sub,
                     )
+                # Odometry for altitude tracking during takeoff
+                self.create_subscription(
+                    VehicleOdometry,
+                    f'{fmu_prefix}fmu/out/vehicle_odometry',
+                    self._odometry_callback,
+                    qos_sub,
+                )
 
                 # Publishers to PX4 (volatile QoS to match PX4's DDS config)
                 qos_pub = QoSProfile(
@@ -93,9 +101,15 @@ def main(args=None):
                 self._offboard_setpoint_count = 0
                 self._armed = False
                 self._offboard_engaged = False
+                self._nav_state = 0
                 self._px4_connected = False
                 self._last_arm_time = 0.0
-                self._startup_count = 0  # Fallback: assume connected after enough ticks (15s = 300 ticks at 20Hz)
+                self._arm_attempts = 0
+                self._startup_count = 0
+                self._takeoff_count = 0
+                self._takeoff_done = False
+                self._takeoff_altitude = 3.0  # meters above ground
+                self._current_z = 0.0  # NED z from odometry (negative = above ground)
 
                 # 20Hz heartbeat timer (offboard mode requires continuous commands)
                 self._timer = self.create_timer(0.05, self._timer_callback)
@@ -110,10 +124,21 @@ def main(args=None):
                 self._cmd_vel = msg
 
             def _vehicle_status_callback(self, msg: VehicleStatus):
-                """Track PX4 connection and arming state."""
+                """Track PX4 connection, arming state, and nav state."""
                 self._px4_connected = True
-                if msg.arming_state == VehicleStatus.ARMING_STATE_ARMED:
-                    self._armed = True
+                was_armed = self._armed
+                self._armed = (msg.arming_state == VehicleStatus.ARMING_STATE_ARMED)
+                self._nav_state = msg.nav_state
+                if self._armed and not was_armed:
+                    self.get_logger().info('PX4 confirmed ARMED')
+                # Check if offboard mode is actually engaged (nav_state 14 = offboard)
+                if msg.nav_state == 14 and not self._offboard_engaged:
+                    self._offboard_engaged = True
+                    self.get_logger().info('PX4 confirmed OFFBOARD mode')
+
+            def _odometry_callback(self, msg: VehicleOdometry):
+                """Track current altitude from PX4 odometry (NED frame)."""
+                self._current_z = msg.position[2]  # NED: negative = above ground
 
             def _timer_callback(self):
                 """20Hz heartbeat: publish offboard mode and velocity setpoints."""
@@ -129,25 +154,58 @@ def main(args=None):
                 if not self._px4_connected and self._startup_count < 300:
                     return
                 if not self._px4_connected and self._startup_count == 300:
-                    self.get_logger().warn('No vehicle_status received, proceeding with arming anyway')
+                    self.get_logger().warn('No vehicle_status received, proceeding anyway')
                     self._px4_connected = True
 
-                # Arming sequence: setpoints -> offboard mode -> wait -> arm
+                # Phase 1: Send setpoints for 2s before requesting offboard mode
                 if self._offboard_setpoint_count < 40:
                     self._offboard_setpoint_count += 1
-                elif not self._offboard_engaged:
-                    self._engage_offboard_mode()
-                    self._offboard_engaged = True
-                    self._offboard_setpoint_count = 0  # Reset to count post-offboard setpoints
-                elif self._offboard_setpoint_count < 20:
-                    # Wait 1 second after offboard mode before arming
-                    self._offboard_setpoint_count += 1
-                elif not self._armed:
-                    # Retry arm every 2s until PX4 accepts (preflight may need time)
+                    return
+
+                # Phase 2: Engage offboard mode (retry every 2s until confirmed)
+                if not self._offboard_engaged:
+                    now = self.get_clock().now().nanoseconds / 1e9
+                    if self._arm_attempts == 0 or now - self._last_arm_time >= 2.0:
+                        self._engage_offboard_mode()
+                        self._last_arm_time = now
+                        self._arm_attempts += 1
+                        if self._arm_attempts >= 5:
+                            self.get_logger().warn(
+                                'Offboard mode not confirmed after 5 attempts, proceeding'
+                            )
+                            self._offboard_engaged = True
+                            self._arm_attempts = 0
+                    return
+
+                # Phase 3: Arm the vehicle (retry every 2s until confirmed)
+                if not self._armed:
                     now = self.get_clock().now().nanoseconds / 1e9
                     if now - self._last_arm_time >= 2.0:
                         self._arm()
                         self._last_arm_time = now
+                        self._arm_attempts += 1
+                        if self._arm_attempts >= 5:
+                            self.get_logger().warn(
+                                'Arm not confirmed after 5 attempts, assuming armed'
+                            )
+                            self._armed = True
+                    return
+
+                # Phase 4: Takeoff to target altitude before forwarding cmd_vel
+                if not self._takeoff_done:
+                    self._takeoff_count += 1
+                    # Check if we've reached target altitude (NED: z is negative when above ground)
+                    altitude = -self._current_z
+                    if altitude >= self._takeoff_altitude * 0.9:
+                        self._takeoff_done = True
+                        self.get_logger().info(
+                            f'Takeoff complete at {altitude:.1f}m, forwarding cmd_vel'
+                        )
+                    elif self._takeoff_count > 200:  # 10s timeout
+                        self._takeoff_done = True
+                        self.get_logger().warn(
+                            f'Takeoff timeout at {altitude:.1f}m, forwarding cmd_vel'
+                        )
 
             def _publish_offboard_control_mode(self):
                 """Publish offboard control mode requesting velocity control."""
@@ -169,20 +227,27 @@ def main(args=None):
                 """
                 msg = TrajectorySetpoint()
 
-                # Only forward actual velocity after armed; send zero during warmup
-                if self._armed:
+                if self._armed and self._takeoff_done:
+                    # Normal operation: forward cmd_vel
                     max_h = 1.5
                     max_v = 1.0
                     vx = max(-max_h, min(max_h, self._cmd_vel.linear.x))
                     vy = max(-max_h, min(max_h, self._cmd_vel.linear.y))
                     vz = max(-max_v, min(max_v, self._cmd_vel.linear.z))
+                    # ENU -> NED coordinate conversion
+                    msg.velocity[0] = vy    # NED x (north) = ENU y (north)
+                    msg.velocity[1] = vx    # NED y (east) = ENU x (east)
+                    msg.velocity[2] = -vz   # NED z (down) = -ENU z (up)
+                elif self._armed and not self._takeoff_done:
+                    # Takeoff: climb at 1 m/s (NED z = -1.0 = upward)
+                    msg.velocity[0] = 0.0
+                    msg.velocity[1] = 0.0
+                    msg.velocity[2] = -1.0
                 else:
-                    vx, vy, vz = 0.0, 0.0, 0.0
-
-                # ENU -> NED coordinate conversion
-                msg.velocity[0] = vy    # NED x (north) = ENU y (north)
-                msg.velocity[1] = vx    # NED y (east) = ENU x (east)
-                msg.velocity[2] = -vz   # NED z (down) = -ENU z (up)
+                    # Pre-arm: hold zero velocity (required heartbeat for offboard)
+                    msg.velocity[0] = 0.0
+                    msg.velocity[1] = 0.0
+                    msg.velocity[2] = 0.0
 
                 # Set NaN for position/acceleration to indicate velocity-only control
                 msg.position[0] = float('nan')
