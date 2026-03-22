@@ -666,158 +666,222 @@ python3 -m pytest tests/ -v
 \section{Running the Gazebo Simulation}
 %=============================================================================
 
-\subsection{Prerequisites}
+\subsection{Quick Start (3 Commands)}
 
-The Gazebo simulation requires:
-\begin{itemize}
-    \item ROS\,2 Humble
-    \item Gazebo Harmonic
-    \item PX4 Autopilot SITL (Software-In-The-Loop)
-    \item micro-XRCE-DDS-Agent (PX4 $\leftrightarrow$ ROS\,2 bridge)
-    \item NVIDIA GPU with \texttt{nvidia-container-toolkit} (for Docker)
-\end{itemize}
-
-These are \textbf{not} installed in the development environment. Use Docker.
-
-\subsection{Docker Setup}
-
-The Docker container \textbf{auto-launches} the full game when started --- no manual intervention is required:
+The entire simulation runs inside Docker. No local ROS\,2 or Gazebo installation is needed --- only Docker Desktop.
 
 \begin{lstlisting}[style=bashstyle]
-# Step 1: Build the simulation Docker image
+# 1. Build the image (first time takes ~20 min, cached afterwards)
 docker build -f Dockerfile.sim -t reach-avoid-sim .
 
-# Step 2: Allow X11 display forwarding (for Gazebo GUI)
-xhost +local:docker
-
-# Step 3: Start the simulation (auto-launches full_game.launch.py)
+# 2. Start the simulation (auto-launches everything)
 docker-compose -f docker-compose.sim.yml up
+
+# 3. Verify drones are flying (in a separate terminal, after ~60s)
+docker exec -it reach-avoid-sim bash -c \
+  'source /opt/ros/humble/setup.bash && \
+   source /home/simuser/ws/install/setup.bash && \
+   ros2 topic echo /attacker/state --field pose.position --once'
 \end{lstlisting}
 
-The container's \texttt{CMD} runs \texttt{ros2 launch reach\_avoid\_bringup full\_game.launch.py}, which starts Gazebo, PX4 SITL instances, all adapters, and both controllers in sequence. The startup timeline is:
+Expected output after $\sim$60\,s: the attacker's position should be moving from its spawn $(5, 20, 3)$ toward the target $(41.5, 12.5, 10)$.
 
-\begin{enumerate}[noitemsep]
-    \item \textbf{$t = 0$\,s:} Gazebo opens with the 45$\times$25\,m arena, ros\_gz\_bridge and XRCE-DDS agent start
-    \item \textbf{$t = 6$\,s:} PX4 SITL instances spawn x500 drones (defender at $(5, 12.5, 3)$, attacker at $(5, 20, 3)$)
-    \item \textbf{$t = 18$\,s:} PX4 adapters, ground truth relay, and attacker controller activate (EKF2 convergence delay)
-    \item \textbf{$t \approx 30$\,s:} Defender controller loads value functions and begins reach-track algorithm
+\begin{warningbox}
+On macOS (Apple Silicon or Intel), Gazebo runs headless (no GUI window). The physics simulation, PX4, and all controllers run normally --- you verify via \texttt{ros2 topic echo}. On Linux with a GPU and X11, Gazebo will open a 3D window.
+\end{warningbox}
+
+\subsection{What Happens at Startup}
+
+The container's \texttt{CMD} runs \texttt{ros2 launch reach\_avoid\_bringup full\_game.launch.py}, which orchestrates the following startup sequence:
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=0.6cm,
+    block/.style={rectangle, draw, rounded corners, fill=blue!10, minimum width=10cm, minimum height=0.7cm, align=left, font=\small},
+]
+    \node[block] (t0) {$t = 0$\,s \quad Gazebo server (headless), ros\_gz\_bridge, XRCE-DDS agent};
+    \node[block, below=of t0] (t6) {$t = 6$\,s \quad PX4 SITL spawns x500\_1 (defender) and x500\_2 (attacker)};
+    \node[block, below=of t6] (t18) {$t = 18$\,s \quad PX4 adapters, ground truth relay, attacker controller};
+    \node[block, below=of t18] (t30) {$t = 30$\,s \quad Defender controller (value functions + reach-track)};
+    \node[block, below=of t30] (t45) {$t \approx 45$\,s \quad GPS converges $\to$ PX4 arms $\to$ offboard mode $\to$ takeoff};
+    \node[block, below=of t45] (t60) {$t \approx 60$\,s \quad Both drones flying, executing reach-avoid algorithms};
+
+    \draw[-{Stealth[length=3mm]}, thick] (t0) -- (t6);
+    \draw[-{Stealth[length=3mm]}, thick] (t6) -- (t18);
+    \draw[-{Stealth[length=3mm]}, thick] (t18) -- (t30);
+    \draw[-{Stealth[length=3mm]}, thick] (t30) -- (t45);
+    \draw[-{Stealth[length=3mm]}, thick] (t45) -- (t60);
+\end{tikzpicture}
+\end{center}
+
+\subsection{Monitoring the Game}
+
+All commands below require the ROS\,2 environment. Use single quotes to avoid shell escaping issues:
+
+\begin{lstlisting}[style=bashstyle]
+# Shorthand: define a helper function (optional)
+# rexec() { docker exec -it reach-avoid-sim bash -c \
+#   "source /opt/ros/humble/setup.bash && \
+#    source /home/simuser/ws/install/setup.bash && $1"; }
+
+# --- Check which nodes are running ---
+docker exec -it reach-avoid-sim bash -c \
+  'source /opt/ros/humble/setup.bash && \
+   source /home/simuser/ws/install/setup.bash && \
+   ros2 node list'
+# Expected: /attacker_controller /defender_controller
+#           /ground_truth_relay /kinematic_sim or /px4_adapter_*
+#           /game_viz /ros_gz_bridge /world_to_map_tf
+
+# --- Watch attacker position (Ctrl+C to stop) ---
+docker exec -it reach-avoid-sim bash -c \
+  'source /opt/ros/humble/setup.bash && \
+   source /home/simuser/ws/install/setup.bash && \
+   ros2 topic echo /attacker/state --field pose.position'
+
+# --- Watch defender position ---
+docker exec -it reach-avoid-sim bash -c \
+  'source /opt/ros/humble/setup.bash && \
+   source /home/simuser/ws/install/setup.bash && \
+   ros2 topic echo /defender/state --field pose.position'
+
+# --- Check velocity commands ---
+docker exec -it reach-avoid-sim bash -c \
+  'source /opt/ros/humble/setup.bash && \
+   source /home/simuser/ws/install/setup.bash && \
+   ros2 topic echo /defender/cmd_vel --once'
+
+# --- List all active topics ---
+docker exec -it reach-avoid-sim bash -c \
+  'source /opt/ros/humble/setup.bash && \
+   source /home/simuser/ws/install/setup.bash && \
+   ros2 topic list'
+
+# --- Check PX4 arm/takeoff status ---
+docker logs reach-avoid-sim 2>&1 | grep -iE "armed|takeoff"
+
+# --- Stop the simulation ---
+docker-compose -f docker-compose.sim.yml down
+\end{lstlisting}
+
+\subsection{Expected Game Behavior}
+
+When the simulation is running correctly:
+
+\begin{enumerate}
+    \item \textbf{Attacker} spawns at $(5, 20, 3)$ and follows 6 waypoints:
+    \begin{itemize}[noitemsep]
+        \item $(5, 12.5, 10) \to (12, 12.5, 10)$: approach obstacle
+        \item $(12, 3, 10) \to (25, 3, 10)$: route around obstacle below $y=5$
+        \item $(25, 12.5, 10) \to (41.5, 12.5, 10)$: re-center and reach target
+    \end{itemize}
+    Speed: 1.6\,m/s ($= 2.0 \times 0.8$ speed fraction). Reaches target in $\sim$30--40\,s of flight.
+
+    \item \textbf{Defender} spawns at $(5, 12.5, 3)$ and uses the \textbf{reach-track controller}:
+    \begin{itemize}[noitemsep]
+        \item Loads precomputed value functions ($\Phi_z$, $V_{z,\infty}$, $\mathcal{B}_z$, $\Phi_h$, $V_{h,T}$, $\mathcal{B}_h$)
+        \item Computes optimal velocity via value function gradients (Algorithm 1 + 2)
+        \item Velocity clamped to 1.5\,m/s horizontal, 1.0\,m/s vertical for PX4 stability
+    \end{itemize}
+
+    \item \textbf{Game outcome}: the defender attempts to intercept the attacker before it reaches the target region $x \in [38,45]$, $y \in [10,15]$. Capture occurs when horizontal distance $\leq 3$\,m \textbf{and} vertical distance $\leq 1$\,m (cylindrical capture zone).
 \end{enumerate}
 
-The Docker image (\texttt{Dockerfile.sim}) installs:
+\subsection{Attacker Control Modes}
+
 \begin{itemize}[noitemsep]
-    \item Ubuntu 22.04 base
-    \item ROS\,2 Humble Desktop (\texttt{ros-humble-desktop})
-    \item Gazebo Harmonic bridge (\texttt{ros-humble-ros-gz})
-    \item PX4 Autopilot compiled for SITL with \texttt{gz\_x500} model
-    \item micro-XRCE-DDS-Agent from source
-    \item \texttt{px4\_msgs} and \texttt{px4\_ros\_com} ROS\,2 packages
-    \item The full \texttt{reach\_avoid\_ws} workspace, pre-built with \texttt{colcon build}
-\end{itemize}
-
-The \texttt{docker-compose.sim.yml} mounts:
-\begin{itemize}[noitemsep]
-    \item \texttt{./data/value\_functions} $\to$ container (read-only) for precomputed value functions
-    \item \texttt{./config} $\to$ container (read-only) for game parameters
-    \item X11 socket for Gazebo GUI display
-\end{itemize}
-
-\begin{infobox}
-The container runs non-interactively (no \texttt{stdin\_open} or \texttt{tty}). To debug, exec into the running container: \texttt{docker exec -it reach-avoid-sim bash}.
-\end{infobox}
-
-\subsection{Launch Commands}
-
-The Docker container auto-launches \texttt{full\_game.launch.py}. For manual launches or debugging, exec into the container:
-
-\begin{lstlisting}[style=bashstyle]
-# Exec into the running container
-docker exec -it reach-avoid-sim bash
-
-# Source the workspace (done automatically by entrypoint)
-source /home/simuser/ws/install/setup.bash
-
-# Launch simulation only (Gazebo + PX4 + adapters + attacker)
-ros2 launch reach_avoid_bringup simulation.launch.py \
-    attacker_mode:=scripted
-
-# Launch full game (simulation + defender controller + viz + RViz)
-ros2 launch reach_avoid_bringup full_game.launch.py \
-    attacker_mode:=scripted \
-    value_function_dir:=/home/simuser/ws/data/value_functions/
-
-# Launch attacker only (no Gazebo, for testing controller logic)
-ros2 launch reach_avoid_bringup attacker_only.launch.py
-\end{lstlisting}
-
-\subsubsection{Verifying the Simulation}
-
-Once the simulation is running, verify that all components are active:
-
-\begin{lstlisting}[style=bashstyle]
-# Exec into the running container
-docker exec -it reach-avoid-sim bash
-
-# Check game status
-ros2 topic echo /game/status --once
-
-# Verify both drones are receiving commands (non-zero velocities)
-ros2 topic echo /defender/cmd_vel --once
-ros2 topic echo /attacker/cmd_vel --once
-
-# List all active topics
-ros2 topic list
-\end{lstlisting}
-
-Expected behavior: the attacker navigates waypoints toward the target at $(41.5, 12.5, 10)$, routing around the obstacle below $y = 5$. The defender intercepts using the reach-track algorithm. The game ends when the defender captures the attacker (cylindrical capture zone: horizontal distance $\leq 3$\,m and vertical distance $\leq 1$\,m) or the attacker reaches the target region.
-
-\textbf{Attacker modes:}
-\begin{itemize}[noitemsep]
-    \item \texttt{scripted} --- follows predefined waypoints toward target
+    \item \texttt{scripted} (default) --- follows predefined waypoints toward target
     \item \texttt{keyboard} --- manual control via \texttt{teleop\_twist\_keyboard}
-    \item \texttt{optimal} --- uses value function gradient for optimal escape
-    \item \texttt{switchable} --- switch between modes at runtime
+    \item \texttt{optimal} --- uses value function gradient for optimal escape (stub)
+    \item \texttt{switchable} --- switch between modes at runtime via ROS\,2 service
 \end{itemize}
 
-\subsection{Gazebo World}
+\subsection{Architecture Details}
 
-The simulation world (\texttt{reach\_avoid\_arena.sdf}) matches the paper's game parameters exactly:
+\subsubsection{Docker Image}
+
+The \texttt{Dockerfile.sim} builds on Ubuntu 22.04 with:
+\begin{itemize}[noitemsep]
+    \item ROS\,2 Humble Desktop + Gazebo Harmonic + ros\_gz bridge
+    \item PX4 Autopilot compiled for SITL with \texttt{gz\_x500} quadrotor model
+    \item micro-XRCE-DDS-Agent (PX4 $\leftrightarrow$ ROS\,2 bridge)
+    \item \texttt{px4\_msgs} and \texttt{px4\_ros\_com} for PX4 message types
+    \item The full \texttt{reach\_avoid\_ws} workspace, pre-built with \texttt{colcon build}
+    \item Value functions and game parameters copied from host
+\end{itemize}
+
+\subsubsection{Gazebo World}
+
+The SDF world (\texttt{reach\_avoid\_arena.sdf}) defines:
 \begin{itemize}[noitemsep]
     \item $45 \times 25 \times 20$\,m room with four walls (matching \texttt{game\_params.yaml})
-    \item Red obstacle box at $x \in [15,20]$, $y \in [5,20]$\,m (center $(17.5, 12.5, 10)$, size $5 \times 15 \times 20$)
-    \item Green transparent target region at $x \in [38,45]$, $y \in [10,15]$\,m (center $(41.5, 12.5, 10)$, size $7 \times 5 \times 20$)
-    \item Ground plane $60 \times 40$\,m, sun at $(22.5, 12.5, 30)$
-    \item DART physics at 1\,kHz, real-time factor 1.0
-    \item Two PX4 x500 quadrotor models (defender at $(5, 12.5, 3)$, attacker at $(5, 20, 3)$)
+    \item Red obstacle: $x \in [15,20]$, $y \in [5,20]$ (center $(17.5, 12.5, 10)$, size $5 \times 15 \times 20$\,m)
+    \item Green target region: $x \in [38,45]$, $y \in [10,15]$ (center $(41.5, 12.5, 10)$, size $7 \times 5 \times 20$\,m)
+    \item Spherical coordinates (Zurich, 47.40\textdegree N, 8.55\textdegree E) for GPS sensor
+    \item NavSat system plugin for GPS simulation
+    \item DART physics at 1\,kHz
 \end{itemize}
 
-\begin{infobox}
-The arena dimensions must match the room bounds in \texttt{game\_params.yaml} (45$\times$25$\times$20\,m) and the value function domain. If the SDF arena is smaller than the value function grid, drones will spawn at positions that map to the wrong value function states, and the reach-avoid algorithms will produce incorrect controls.
-\end{infobox}
+\subsubsection{PX4 SITL Configuration}
 
-\subsection{Simulation Parameters}
+Each PX4 instance runs with these parameters (set via \texttt{PX4\_PARAM\_*} environment variables):
 
-The file \texttt{reach\_avoid\_bringup/config/simulation\_params.yaml} configures:
+\begin{table}[h]
+\centering
+\small
+\caption{PX4 SITL parameter configuration.}
+\begin{tabular}{llp{6cm}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Purpose} \\
+\midrule
+\texttt{EKF2\_GPS\_CTRL} & 7 & GPS fusion (position + velocity + altitude) \\
+\texttt{EKF2\_MAG\_TYPE} & 1 & Automatic magnetometer fusion \\
+\texttt{EKF2\_MAG\_CHECK} & 0 & Disable mag consistency check \\
+\texttt{COM\_ARM\_WO\_GPS} & 1 & Allow arming before GPS lock \\
+\texttt{CBRK\_SUPPLY\_CHK} & 894281 & Bypass power supply check \\
+\texttt{CBRK\_FLIGHTTERM} & 121212 & Bypass flight termination \\
+\texttt{COM\_DISARM\_PRFLT} & $-1$ & Disable auto preflight disarm \\
+\texttt{FD\_FAIL\_P/R} & 0 & Disable pitch/roll failure detection \\
+\texttt{COM\_IMB\_PROP\_ACT} & 0 & Disable propeller imbalance action \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Ground Truth Relay}
+
+The ground truth relay node bridges PX4 local position to game coordinates:
+
 \begin{itemize}[noitemsep]
-    \item Topic names for defender/attacker state, velocity, and commands
-    \item PX4 vehicle IDs (defender=1, attacker=2) and MAVLink ports
-    \item Gazebo model names (\texttt{x500\_1}, \texttt{x500\_2})
-    \item Control rates: PX4 heartbeat 20\,Hz, ground truth 50\,Hz, control 20\,Hz
-    \item Default attacker waypoints navigating around the obstacle to the target
+    \item Subscribes to PX4's \texttt{VehicleLocalPosition} via \texttt{px4\_msgs} (50\,Hz)
+    \item Converts NED (North-East-Down) to ENU (East-North-Up) by swapping $x \leftrightarrow y$ and negating $z$
+    \item Adds spawn position offsets: defender $(5, 12.5, 3)$, attacker $(5, 20, 3)$
+    \item Publishes to \texttt{/defender/state} and \texttt{/attacker/state} as \texttt{PoseStamped}
 \end{itemize}
 
-The attacker waypoints are configured for the 45\,m arena and route around the obstacle (which spans $y \in [5,20]$) by going below $y = 5$:
+\subsubsection{PX4 Adapter}
 
-\begin{lstlisting}[style=yamlstyle, title=\textbf{Attacker waypoints (simulation\_params.yaml)}]
-attacker_waypoints:
-  - [5.0, 12.5, 10.0]     # Starting area (near west wall)
-  - [12.0, 12.5, 10.0]    # Approach obstacle
-  - [12.0, 3.0, 10.0]     # Go around obstacle (below y=5)
-  - [25.0, 3.0, 10.0]     # Past obstacle
-  - [25.0, 12.5, 10.0]    # Re-center
-  - [41.5, 12.5, 10.0]    # Target center
+The PX4 adapter translates velocity commands to PX4 offboard control:
+
+\begin{itemize}[noitemsep]
+    \item Subscribes to \texttt{/defender/cmd\_vel} (or \texttt{/attacker/cmd\_vel})
+    \item Clamps velocities to 1.5\,m/s horizontal, 1.0\,m/s vertical for flight stability
+    \item Converts ENU to NED and publishes \texttt{TrajectorySetpoint} + \texttt{OffboardControlMode}
+    \item Auto-engages offboard mode and force-arms PX4 after GPS convergence ($\sim$15\,s)
+\end{itemize}
+
+\subsection{Kinematic Simulation Mode (No PX4)}
+
+For faster iteration or environments where PX4 SITL is problematic, a lightweight kinematic simulator is available:
+
+\begin{lstlisting}[style=bashstyle]
+# In docker-compose.sim.yml, change the command to:
+command: ros2 launch reach_avoid_bringup kinematic_game.launch.py
+
+# Or run directly inside the container:
+ros2 launch reach_avoid_bringup kinematic_game.launch.py
 \end{lstlisting}
 
-The attacker controller in \texttt{simulation.launch.py} is configured with \texttt{target\_x}$=$41.5, \texttt{target\_y}$=$12.5, \texttt{target\_z}$=$10.0 (center of the target region) and \texttt{max\_speed}$=$2.0\,m/s (below the attacker's theoretical maximum of 3.0\,m/s for stability).
+This mode replaces Gazebo + PX4 with simple velocity integration ($\mathbf{x}_{t+1} = \mathbf{x}_t + \mathbf{v} \cdot \Delta t$). The reach-avoid controllers are identical --- only the physics layer changes. Startup is instant (no GPS convergence wait).
 
 
 %=============================================================================
@@ -1001,29 +1065,32 @@ The proportional gains ($k_x$, $k_y$, $k_z$) model the Crazyflie's velocity resp
     \item[\texttt{T\_capture} returns infinity]
     Same root cause as above. The time slices never reach $\leq 0$ on coarse grids because $\mathcal{B}_z$ is too small as a target set.
 
-    \item[Gazebo crashes immediately]
-    Check that the NVIDIA container toolkit is installed and X11 forwarding is configured. Run \texttt{xhost +local:docker} before \texttt{docker-compose up}.
+    \item[Docker build fails: package not found]
+    ROS\,2 packages (\texttt{python3-colcon-common-extensions}, etc.) must be installed \textbf{after} the ROS\,2 apt repository is added. The Dockerfile adds repos first, then installs all packages in a single \texttt{apt-get install}.
 
-    \item[PX4 SITL does not connect]
-    Ensure \texttt{MicroXRCEAgent} is running on UDP port 8888. The PX4 instance must be configured with the correct \texttt{PX4\_SIM\_MODEL=gz\_x500}.
+    \item[\texttt{nvidia} runtime error on macOS]
+    macOS has no NVIDIA GPU. The \texttt{docker-compose.sim.yml} has the \texttt{runtime: nvidia} and GPU sections commented out. Gazebo runs headless (\texttt{-s} server mode) without a display.
 
-    \item[Defender hovers without moving]
-    The controller falls back to hover when value functions are not loaded. Check that the \texttt{value\_function\_dir} parameter points to a directory containing all required \texttt{.npz} files.
+    \item[PX4 ``Arming denied: system health failures'']
+    PX4 requires GPS lock before arming. The SDF world must include \texttt{<spherical\_coordinates>} (with valid lat/lon) and the \texttt{gz-sim-navsat-system} plugin. GPS convergence takes $\sim$15--30\,s after drone spawn. The adapter uses force-arm (\texttt{param2=21196}) to bypass remaining preflight checks.
 
-    \item[Drones hover in place but never execute reach-avoid algorithms]
-    Three common causes: (1)~the Docker container opened an interactive bash shell instead of auto-launching --- verify \texttt{CMD} in \texttt{Dockerfile.sim} is \texttt{ros2 launch reach\_avoid\_bringup full\_game.launch.py}; (2)~the SDF arena dimensions don't match \texttt{game\_params.yaml} --- the arena must be 45$\times$25$\times$20\,m, not the old 8$\times$8$\times$4\,m; (3)~spawn positions and waypoints are outside the value function domain.
+    \item[PX4 \texttt{xy\_valid: false}]
+    EKF2 has no horizontal position. Causes: (1)~missing \texttt{<spherical\_coordinates>} in SDF; (2)~missing NavSat system plugin; (3)~\texttt{EKF2\_GPS\_CTRL=0} (GPS fusion disabled). Set \texttt{EKF2\_GPS\_CTRL=7} and add both SDF elements.
 
-    \item[Arena/value function dimension mismatch]
-    The SDF arena, \texttt{game\_params.yaml}, spawn positions in \texttt{simulation.launch.py}, and attacker waypoints in \texttt{simulation\_params.yaml} must all use consistent dimensions. The paper uses 45$\times$25$\times$20\,m. If any component uses different dimensions (e.g., the old 8\,m arena), drones will spawn at positions that map incorrectly in the value function grid.
+    \item[PX4 compass fault / imbalanced propeller]
+    Common in headless SITL, especially with aggressive velocity commands. Mitigations: set \texttt{EKF2\_MAG\_CHECK=0}, \texttt{COM\_IMB\_PROP\_ACT=0}, \texttt{CBRK\_FLIGHTTERM=121212}. Reduce velocity clamp in the PX4 adapter (default: 1.5\,m/s horizontal, 1.0\,m/s vertical).
 
-    \item[Safety monitor triggers immediately]
-    Verify that motion capture is publishing valid poses. The watchdog triggers emergency if no state is received within 1\,s.
+    \item[\texttt{numpy.\_core} ModuleNotFoundError]
+    Value function \texttt{.npz} files were saved with numpy 2.x but the container has numpy 1.x. The \texttt{value\_function\_loader.py} catches this error and falls back to empty params (the controller uses hardcoded defaults). Not a critical error.
 
-    \item[\texttt{RegularGridInterpolator} bounds error]
-    States are clamped to grid bounds before interpolation. If you see this error, a clamping step is missing --- check that \texttt{np.clip} is applied before calling the interpolator.
+    \item[\texttt{/defender/state} or \texttt{/attacker/state} hangs (no data)]
+    The ground truth relay is not receiving PX4 position data. Check: (1)~\texttt{px4\_msgs} is importable --- the Dockerfile sets \texttt{PYTHONPATH} to include the px4\_ros\_ws install; (2)~PX4 local position topic is publishing: \texttt{ros2 topic hz /defender/fmu/out/vehicle\_local\_position\_v1}; (3)~the node is running: \texttt{ros2 node list} should show \texttt{/ground\_truth\_relay}.
 
-    \item[Value function NaN or Inf after solve]
-    Verify the initial value function (SDF) is finite everywhere. Check that grid domain bounds match the room dimensions in \texttt{game\_params.yaml}.
+    \item[Defender flies out of bounds / unstable flight]
+    The reach-track controller outputs maximum velocity ($U_D = 6$\,m/s), which causes motor saturation in PX4's x500 model. The PX4 adapter clamps velocities (1.5\,m/s horizontal, 1.0\,m/s vertical). If the defender still flies erratically, reduce these clamp values or use the kinematic simulation mode.
+
+    \item[Drones arm but immediately disarm]
+    PX4's auto preflight disarm triggers if no takeoff occurs within the timeout. Set \texttt{COM\_DISARM\_PRFLT=$-1$} to disable. Also ensure offboard mode is engaged \textbf{before} arming --- the adapter sends 40 setpoints, engages offboard, waits 20 more setpoints, then arms.
 \end{description}
 
 
