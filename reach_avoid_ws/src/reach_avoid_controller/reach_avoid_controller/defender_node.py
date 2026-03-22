@@ -140,10 +140,14 @@ class DefenderControlLogic:
     ) -> tuple[float, str]:
         """Algorithm 1 -- Vertical Reach-Track controller.
 
-        Three modes:
-        1. NOT in B_z: optimal reaching control from phi_z gradient
-        2. In B_z, near boundary: optimal tracking from V_z_inf gradient
-        3. Deep in B_z: PID tracking
+        Per the paper, optimal HJ control is only valid inside the
+        defender's winning region (phi_z <= 0). Outside, we use PID pursuit.
+
+        Modes:
+        1. Outside winning region: PID pursuit toward attacker
+        2. In winning region, NOT in B_z: optimal reaching from phi_z gradient
+        3. In B_z, near boundary: optimal tracking from V_z_inf gradient
+        4. Deep in B_z: PID tracking
 
         Returns:
             (u_z control value, mode string)
@@ -151,30 +155,35 @@ class DefenderControlLogic:
         if "B_z" not in self.loader.loaded_names:
             return self._pid_vertical(z_D, z_A), "pid_fallback"
 
+        # First check: are we in the defender's winning region?
+        in_winning = False
+        if "phi_z" in self.loader.loaded_names:
+            phi_z_val = self.loader.get_value("phi_z", vertical_state)
+            in_winning = phi_z_val <= 0
+
         # Check if inside invariant set B_z (B_z is stored with z_rel, v_D_z coords)
         bz_state = np.array([z_rel, vz_D])
         b_z_val = self.loader.get_value("B_z", bz_state)
         in_B_z = b_z_val > 0.5
 
         if not in_B_z:
-            # Mode 1: Optimal reaching -- use phi_z gradient
-            if "phi_z" in self.loader.loaded_names:
+            if in_winning and "phi_z" in self.loader.loaded_names:
+                # Mode 2: In winning region, optimal reaching from phi_z gradient
                 return self._optimal_reaching_vertical(vertical_state), "reaching"
-            return self._pid_vertical(z_D, z_A), "pid_fallback"
+            # Outside winning region or no VF: PID pursuit
+            return self._pid_vertical(z_D, z_A), "pid_pursuit"
 
         # Inside B_z -- check if near boundary or deep inside
-        # Use V_z_inf value to determine depth. B_z = {V_z_inf <= d_z_eff}
         margin_z = self.margin_z_factor * self.d_z
         if "V_z_inf" in self.loader.loaded_names:
             v_z_inf_val = self.loader.get_value("V_z_inf", bz_state)
-            # Near boundary: V_z_inf close to d_z_eff
             near_boundary = v_z_inf_val > (self.d_z_eff - margin_z)
 
             if near_boundary:
-                # Mode 2: Optimal tracking from V_z_inf gradient
+                # Mode 3: Optimal tracking from V_z_inf gradient
                 return self._optimal_tracking_vertical(bz_state), "tracking"
 
-        # Mode 3: Deep inside B_z, use PID
+        # Mode 4: Deep inside B_z, use PID
         return self._pid_vertical(z_D, z_A), "pid_deep"
 
     def _optimal_reaching_vertical(self, vertical_state: np.ndarray) -> float:
@@ -217,10 +226,14 @@ class DefenderControlLogic:
     ) -> tuple[float, float, str]:
         """Algorithm 2 -- Horizontal Reach-Track-Avoid controller.
 
-        Three modes:
-        1. NOT in B_h: optimal reaching from phi_h gradient
-        2. In B_h, near boundary: optimal tracking from V_h_T gradient
-        3. Deep in B_h: PID tracking
+        Per the paper, optimal HJ control is only valid inside the
+        defender's winning region (phi_h <= 0). Outside, we use PID pursuit.
+
+        Modes:
+        1. Outside winning region: PID pursuit toward attacker
+        2. In winning region, NOT in B_h: optimal reaching from phi_h gradient
+        3. In B_h, near boundary: optimal tracking from V_h_T gradient
+        4. Deep in B_h: PID tracking
 
         Returns:
             (u_x, u_y, mode string)
@@ -228,16 +241,23 @@ class DefenderControlLogic:
         if "B_h" not in self.loader.loaded_names:
             return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_fallback"
 
+        # First check: are we in the defender's winning region?
+        in_winning = False
+        if "phi_h" in self.loader.loaded_names:
+            phi_h_val = self.loader.get_value("phi_h", horizontal_state)
+            in_winning = phi_h_val <= 0
+
         # B_h is in relative coords: [x_rel, y_rel, vx_D, vy_D]
         bh_state = np.array([x_rel, y_rel, vx_D, vy_D])
         b_h_val = self.loader.get_value("B_h", bh_state)
         in_B_h = b_h_val > 0.5
 
         if not in_B_h:
-            # Mode 1: Optimal reaching from phi_h gradient
-            if "phi_h" in self.loader.loaded_names:
+            if in_winning and "phi_h" in self.loader.loaded_names:
+                # Mode 2: In winning region, optimal reaching from phi_h
                 return *self._optimal_reaching_horizontal(horizontal_state), "reaching"
-            return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_fallback"
+            # Outside winning region or no VF: PID pursuit toward attacker
+            return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_pursuit"
 
         # Inside B_h
         margin_h = self.margin_h_factor * self.d_h
@@ -246,10 +266,10 @@ class DefenderControlLogic:
             near_boundary = v_h_val > (self.d_h_eff - margin_h)
 
             if near_boundary:
-                # Mode 2: Optimal tracking from V_h_T gradient
+                # Mode 3: Optimal tracking from V_h_T gradient
                 return *self._optimal_tracking_horizontal(bh_state), "tracking"
 
-        # Mode 3: Deep inside B_h, PID
+        # Mode 4: Deep inside B_h, PID
         return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_deep"
 
     def _optimal_reaching_horizontal(self, horizontal_state: np.ndarray) -> tuple[float, float]:

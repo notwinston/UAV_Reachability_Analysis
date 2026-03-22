@@ -229,8 +229,9 @@ def main(args=None):
 
                 if self._armed and self._takeoff_done:
                     # Normal operation: forward cmd_vel
-                    max_h = 1.5
-                    max_v = 1.0
+                    # Match game parameters: U_D_h=6.0 m/s, U_D_z=4.0 m/s
+                    max_h = 6.0
+                    max_v = 4.0
                     vx = max(-max_h, min(max_h, self._cmd_vel.linear.x))
                     vy = max(-max_h, min(max_h, self._cmd_vel.linear.y))
                     vz = max(-max_v, min(max_v, self._cmd_vel.linear.z))

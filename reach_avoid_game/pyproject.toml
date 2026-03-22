@@ -1,12 +1,12 @@
-# Active HJ solver library: hj-reachability==0.7.0 (OptimizedDP not used)
+# HJ solver: custom OptimizedDP-compatible NumPy implementation (no HeteroCL needed)
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "reach-avoid-game"
-version = "0.1.0"
-description = "Reach-Avoid Differential Game with HJ Reachability Analysis"
+version = "0.2.0"
+description = "Reach-Avoid Differential Game with HJ Reachability Analysis (OptimizedDP)"
 requires-python = ">=3.10"
 dependencies = [
     "jax[cpu]",

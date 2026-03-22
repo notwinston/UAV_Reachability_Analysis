@@ -81,12 +81,12 @@ class TestModeTransitions:
         d_vel = np.array([0.0, 0.0, 0.0])
         a_pos = np.array([30.0, 20.0, 15.0])
         _, status = logic.compute_control(d_pos, d_vel, a_pos)
-        # Far apart -> outside B_z and B_h -> reaching
-        assert status["z_mode"] in ("reaching", "pid_fallback")
-        assert status["h_mode"] in ("reaching", "pid_fallback")
+        # Far apart -> outside B_z and B_h -> reaching or pid_pursuit (if outside winning region)
+        assert status["z_mode"] in ("reaching", "pid_fallback", "pid_pursuit")
+        assert status["h_mode"] in ("reaching", "pid_fallback", "pid_pursuit")
 
     def test_mode_is_valid_string(self, logic):
-        valid_modes = {"reaching", "tracking", "pid_deep", "pid_fallback"}
+        valid_modes = {"reaching", "tracking", "pid_deep", "pid_fallback", "pid_pursuit"}
         d_pos = np.array([10.0, 10.0, 10.0])
         d_vel = np.array([1.0, -1.0, 0.5])
         a_pos = np.array([12.0, 8.0, 11.0])

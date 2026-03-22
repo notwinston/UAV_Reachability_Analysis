@@ -1,18 +1,12 @@
 """Attacker reaching dynamics for T_goal computation.
 
 2D state: [x_A, y_A]
-Dynamics:
-  x_A_dot = d_x
-  y_A_dot = d_y
-
-Speed constraint: ||(d_x, d_y)|| <= U_A_h
-
-The attacker minimizes the value function (tries to reach target ASAP).
-No defender involvement — pure attacker reachability.
+The attacker minimizes the value function (reaches target ASAP).
 """
 
 from __future__ import annotations
 
+import numpy as np
 import jax.numpy as jnp
 import hj_reachability as hj
 
@@ -20,11 +14,7 @@ from reach_avoid_game.config import GameConfig
 
 
 class AttackerReachingDynamics(hj.ControlAndDisturbanceAffineDynamics):
-    """2D attacker reaching dynamics.
-
-    Control: [d_x, d_y] — attacker velocity (treated as control, minimizing)
-    Disturbance: none (scalar dummy)
-    """
+    """2D attacker reaching dynamics."""
 
     def __init__(self, config: GameConfig) -> None:
         self.u_a_h = config.attacker.max_speed_horizontal
@@ -43,19 +33,10 @@ class AttackerReachingDynamics(hj.ControlAndDisturbanceAffineDynamics):
         )
 
     def open_loop_dynamics(self, state, time):
-        """No drift."""
         return jnp.array([0.0, 0.0])
 
     def control_jacobian(self, state, time):
-        """Control directly sets velocity."""
-        return jnp.array([
-            [1.0, 0.0],
-            [0.0, 1.0],
-        ])
+        return jnp.array([[1.0, 0.0], [0.0, 1.0]])
 
     def disturbance_jacobian(self, state, time):
-        """No disturbance."""
-        return jnp.array([
-            [0.0],
-            [0.0],
-        ])
+        return jnp.array([[0.0], [0.0]])
