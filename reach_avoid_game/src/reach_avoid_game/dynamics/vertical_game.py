@@ -1,14 +1,10 @@
 """Vertical sub-game dynamics for HJ reachability solver.
 
 3D state: [z_D, v_D_z, z_A]
-  - z_D: defender vertical position
-  - v_D_z: defender vertical velocity
-  - z_A: attacker vertical position
-
 Dynamics (Eq. 25 in paper):
   z_D_dot   = v_D_z
-  v_D_z_dot = k_z * (u_z - v_D_z)    [defender control u_z, |u_z| <= U_D_z]
-  z_A_dot   = d_z                     [attacker control d_z, |d_z| <= U_A_z]
+  v_D_z_dot = k_z * (u_z - v_D_z)
+  z_A_dot   = d_z
 
 Two-player game:
   - Defender (control) maximizes value (tries to capture)
@@ -17,18 +13,18 @@ Two-player game:
 
 from __future__ import annotations
 
+import numpy as np
 import jax.numpy as jnp
-
 import hj_reachability as hj
 
 from reach_avoid_game.config import GameConfig
 
 
 class VerticalGameDynamics(hj.ControlAndDisturbanceAffineDynamics):
-    """3D vertical sub-game dynamics for HJ reachability.
+    """3D vertical sub-game dynamics.
 
-    Control: u_z (scalar) — defender vertical velocity command
-    Disturbance: d_z (scalar) — attacker vertical velocity
+    Implements both hj_reachability interface (for solver) and
+    OptimizedDP-style pure-Python methods (for online control).
     """
 
     def __init__(self, config: GameConfig) -> None:
@@ -50,23 +46,13 @@ class VerticalGameDynamics(hj.ControlAndDisturbanceAffineDynamics):
         )
 
     def open_loop_dynamics(self, state, time):
-        """Open-loop dynamics f(x, t): drift when no control/disturbance applied.
-
-        z_D_dot   = v_D_z
-        v_D_z_dot = k_z * (0 - v_D_z) = -k_z * v_D_z
-        z_A_dot   = 0
-        """
         return jnp.array([
-            state[1],              # z_D_dot = v_D_z
-            -self.k_z * state[1],  # v_D_z_dot = -k_z * v_D_z (open-loop part)
-            0.0,                   # z_A_dot = 0 (no control)
+            state[1],
+            -self.k_z * state[1],
+            0.0,
         ])
 
     def control_jacobian(self, state, time):
-        """Control Jacobian G_u(x, t): maps control u_z to state derivatives.
-
-        Only v_D_z_dot is affected: v_D_z_dot += k_z * u_z
-        """
         return jnp.array([
             [0.0],
             [self.k_z],
@@ -74,12 +60,23 @@ class VerticalGameDynamics(hj.ControlAndDisturbanceAffineDynamics):
         ])
 
     def disturbance_jacobian(self, state, time):
-        """Disturbance Jacobian G_d(x, t): maps disturbance d_z to state derivatives.
-
-        Only z_A_dot is affected: z_A_dot = d_z
-        """
         return jnp.array([
             [0.0],
             [0.0],
             [1.0],
         ])
+
+    # --- OptimizedDP-compatible pure-Python methods (for online control) ---
+
+    def opt_ctrl_numpy(self, state, spat_deriv):
+        """Optimal control (NumPy). u_z = U_D_z * sign(dV/dv_Dz * k_z)."""
+        coeff = spat_deriv[1] * self.k_z
+        return np.where(coeff >= 0, self.u_d_z, -self.u_d_z)
+
+    def opt_dstb_numpy(self, state, spat_deriv):
+        """Optimal disturbance (NumPy). d_z = -U_A_z * sign(dV/dz_A)."""
+        return np.where(spat_deriv[2] >= 0, -self.u_a_z, self.u_a_z)
+
+    def dynamics_numpy(self, state, u_z, d_z):
+        """State derivatives (NumPy)."""
+        return (state[1], self.k_z * (u_z - state[1]), d_z)

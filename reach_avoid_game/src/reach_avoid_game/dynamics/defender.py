@@ -16,7 +16,6 @@ Speed constraints:
 
 from __future__ import annotations
 
-import jax.numpy as jnp
 import numpy as np
 
 from reach_avoid_game.config import DefenderConfig

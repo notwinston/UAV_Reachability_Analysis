@@ -1,9 +1,10 @@
-"""Abstract base class for reach-avoid game dynamics, built on hj_reachability."""
+"""Base interface for reach-avoid game dynamics.
 
-from __future__ import annotations
+All dynamics classes extend hj_reachability.ControlAndDisturbanceAffineDynamics
+and additionally provide OptimizedDP-style pure-Python methods for online
+control (opt_ctrl_numpy, opt_dstb_numpy, dynamics_numpy).
+"""
 
 import hj_reachability as hj
 
-
-# Re-export the base class from hj_reachability for convenience
 DynamicsBase = hj.ControlAndDisturbanceAffineDynamics
