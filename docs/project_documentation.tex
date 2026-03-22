@@ -117,10 +117,11 @@
 
 \begin{tabular}{ll}
 \textbf{Framework:} & Hamilton-Jacobi Reachability Analysis\\
-\textbf{Solver:} & \texttt{hj\_reachability} v0.7.0 (JAX)\\
+\textbf{Solver:} & OptimizedDP-compatible API (hj\_reachability v0.7.0 backend)\\
 \textbf{Simulation:} & Gazebo Harmonic + PX4 SITL\\
 \textbf{Hardware:} & Crazyflie 2.1 + Crazyswarm2\\
 \textbf{Middleware:} & ROS\,2 Humble\\
+\textbf{Version:} & 0.2.0\\
 \end{tabular}
 
 \vfill
@@ -148,9 +149,9 @@ Each sub-game is solved independently using HJ reachability analysis, and the so
 The implementation spans three layers:
 
 \begin{itemize}
-    \item \textbf{Offline computation:} Value functions are solved on a discretized grid using the \texttt{hj\_reachability} library (JAX/GPU-accelerated). These represent optimal strategies for all possible states.
-    \item \textbf{Online control:} A real-time ROS\,2 controller reads drone states, interpolates precomputed value functions, extracts optimal controls via gradient computation, and publishes velocity commands at 50\,Hz.
-    \item \textbf{Simulation \& hardware:} The game runs in Gazebo with PX4 autopilot for physics-based validation, or on real Crazyflie~2.1 drones with motion capture for state estimation.
+    \item \textbf{Offline computation:} Value functions are solved on a discretized grid using an OptimizedDP-compatible solver API (backed by \texttt{hj\_reachability} with JAX/GPU acceleration). These represent optimal strategies for all possible states.
+    \item \textbf{Online control:} A real-time ROS\,2 controller reads drone states, interpolates precomputed value functions, extracts optimal controls via gradient computation, and publishes velocity commands at 50\,Hz. When outside the proven winning region, a PID pursuit controller drives the defender directly toward the attacker.
+    \item \textbf{Simulation \& hardware:} The game runs in Gazebo with PX4 autopilot for physics-based validation, as a lightweight kinematic simulation without PX4, or on real Crazyflie~2.1 drones with motion capture for state estimation.
 \end{itemize}
 
 \subsection{Key Results}
@@ -304,11 +305,18 @@ Where $T_\text{goal}$ is the earliest time the attacker can reach its target (fr
   reach_avoid_game/         # Core Python package (offline computation)
     src/reach_avoid_game/
       config.py             # GameConfig dataclass
-      dynamics/             # HJ dynamics classes
+      dynamics/             # HJ dynamics classes (dual API)
       solvers/              # HJ solvers and utilities
+      odp/                  # OptimizedDP-compatible API layer
+        grid.py             # Grid class (NumPy, matches ODP API)
+        solver.py           # HJSolver wrapper + computeSpatDerivArray
+        shapes.py           # Shape functions for initial values
       visualization/        # Plotting functions
     scripts/                # CLI entry points
     tests/                  # Pytest test suite (60 tests)
+  tests/
+    integration/
+      test_kinematic_game.py  # Standalone end-to-end simulation
   reach_avoid_ws/           # ROS 2 workspace (online control)
     src/
       reach_avoid_bringup/  # Launch files and parameters
@@ -321,9 +329,37 @@ Where $T_\text{goal}$ is the earliest time the attacker can reach its target (fr
 
 \subsection{Offline Computation Package: \texttt{reach\_avoid\_game}}
 
+\subsubsection{OptimizedDP-Compatible Solver API (\texttt{odp/})}
+
+A custom OptimizedDP-compatible package provides the paper's solver API without requiring HeteroCL (which is only available for Python~3.8 via conda). The package includes:
+
+\begin{itemize}
+    \item \texttt{grid.py}: \texttt{Grid(minBounds, maxBounds, dims, pts\_each\_dim, periodicDims)} --- same API as \texttt{odp.Grid.GridProcessing.Grid} from the SFU-MARS OptimizedDP repository.
+    \item \texttt{solver.py}: \texttt{HJSolver(dynamics, grid, values, tau, compMethod)} --- OptimizedDP-compatible entry point that delegates to \texttt{hj\_reachability}'s proven Lax-Friedrichs solver internally. Also provides \texttt{computeSpatDerivArray(grid, V, dim)} for spatial derivative extraction.
+    \item \texttt{shapes.py}: \texttt{CylinderShape}, \texttt{ShapeRectangle} for constructing initial value function SDFs.
+\end{itemize}
+
+The \texttt{HJSolver} translates OptimizedDP's \texttt{compMethod} dictionary to \texttt{hj\_reachability} solver settings:
+
+\begin{table}[h]
+\centering
+\small
+\caption{Mapping between OptimizedDP and hj\_reachability solver modes.}
+\begin{tabular}{lp{6cm}}
+\toprule
+\textbf{OptimizedDP \texttt{compMethod}} & \textbf{hj\_reachability equivalent} \\
+\midrule
+\texttt{"TargetSetMode": "minVWithV0"} & Backward Reachable Tube ($V = \min(V, V_0)$) \\
+\texttt{"TargetSetMode": "maxVWithV0"} & Max-over-time ($V = \max(V, V_0)$) \\
+\texttt{"ObstacleSetMode": "maxVWithObstacle"} & Reach-avoid with obstacle constraint \\
+\texttt{"TargetSetMode": "none"} & Pure backward reachable set \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsubsection{Dynamics Classes}
 
-Each dynamics class inherits from \texttt{hj.ControlAndDisturbanceAffineDynamics} and implements three methods:
+Each dynamics class inherits from \texttt{hj.ControlAndDisturbanceAffineDynamics} (for the HJ solver) and additionally provides OptimizedDP-style pure-Python methods for online control extraction. The class implements three hj\_reachability methods:
 
 \begin{table}[h]
 \centering
@@ -342,11 +378,18 @@ Each dynamics class inherits from \texttt{hj.ControlAndDisturbanceAffineDynamics
 \end{tabular}
 \end{table}
 
-Each class provides:
+Each class provides the \textbf{hj\_reachability interface} (for the solver):
 \begin{itemize}
     \item \texttt{open\_loop\_dynamics(state, time)} --- drift dynamics $f(x)$ when $u = 0$, $d = 0$
     \item \texttt{control\_jacobian(state, time)} --- matrix $G_u$ mapping control to state derivatives
     \item \texttt{disturbance\_jacobian(state, time)} --- matrix $G_d$ mapping disturbance to state derivatives
+\end{itemize}
+
+Key classes also provide the \textbf{OptimizedDP-compatible NumPy methods} (for online control extraction):
+\begin{itemize}
+    \item \texttt{opt\_ctrl\_numpy(state, spat\_deriv)} --- optimal control from value function gradient
+    \item \texttt{opt\_dstb\_numpy(state, spat\_deriv)} --- optimal disturbance from gradient
+    \item \texttt{dynamics\_numpy(state, u, d)} --- state derivatives given control and disturbance
 \end{itemize}
 
 The \texttt{HorizontalGameTrackingDynamics} class is identical to \texttt{HorizontalGameDynamics} except with \textbf{swapped optimization}: \texttt{control\_mode="min"} (defender minimizes distance) and \texttt{disturbance\_mode="max"} (attacker maximizes distance). This is used for computing the maximum distance value function $V_{h,T}$ in 6D coordinates with obstacle penalties.
@@ -449,15 +492,20 @@ Time slices (for $T_\text{capture}$ extraction) are stored separately as \texttt
 The \texttt{DefenderControllerNode} runs at 50\,Hz and implements the two-algorithm reach-track controller:
 
 \begin{algorithm}[H]
-\caption{Vertical Reach-Track (Algorithm 1)}
+\caption{Vertical Reach-Track (Algorithm 1) --- with winning region guard}
 \begin{algorithmic}[1]
 \State \textbf{Input:} Vertical state $(z_D, v_{D,z}, z_A)$, value functions $\Phi_z$, $V_{z,\infty}$, $\mathcal{B}_z$
 \State Compute $z_\text{rel} \gets z_D - z_A$
+\State $\textit{in\_winning} \gets \Phi_z(z_D, v_{D,z}, z_A) \leq 0$ \Comment{Check defender's winning region}
 \State Look up $\mathcal{B}_z(z_\text{rel}, v_{D,z})$
 \If{NOT in $\mathcal{B}_z$}
-    \State $u_z \gets$ optimal reaching control from $\nabla\Phi_z$ \Comment{Mode: REACHING}
+    \If{$\textit{in\_winning}$}
+        \State $u_z \gets$ optimal reaching control from $\nabla\Phi_z$ \Comment{Mode: REACHING}
+    \Else
+        \State $u_z \gets \text{PID}(z_A - z_D)$ \Comment{Mode: PID\_PURSUIT}
+    \EndIf
 \ElsIf{deep inside $\mathcal{B}_z$}
-    \State $u_z \gets \text{PID}(z_A - z_D)$ \Comment{Mode: PID}
+    \State $u_z \gets \text{PID}(z_A - z_D)$ \Comment{Mode: PID\_DEEP}
 \Else
     \State $u_z \gets$ optimal tracking control from $\nabla V_{z,\infty}$ \Comment{Mode: TRACKING}
 \EndIf
@@ -465,16 +513,25 @@ The \texttt{DefenderControllerNode} runs at 50\,Hz and implements the two-algori
 \end{algorithmic}
 \end{algorithm}
 
+\begin{infobox}
+The \textbf{winning region guard} ($\Phi \leq 0$ check) is critical for robustness. The paper's optimal HJ controls are only valid inside the winning region. On coarse grids (e.g., the \texttt{dev} preset with a $9 \times 7 \times 5 \times 5 \times 9 \times 7$ 6D grid), $\Phi_h > 0$ everywhere, meaning value function gradients point in arbitrary directions. PID pursuit provides a reliable fallback that always drives the defender toward the attacker.
+\end{infobox}
+
 \begin{algorithm}[H]
-\caption{Horizontal Reach-Track-Avoid (Algorithm 2)}
+\caption{Horizontal Reach-Track-Avoid (Algorithm 2) --- with winning region guard}
 \begin{algorithmic}[1]
 \State \textbf{Input:} Horizontal state $(x_D, y_D, v_{D,x}, v_{D,y}, x_A, y_A)$, value functions $\Phi_h$, $V_{h,T}$, $\mathcal{B}_h$
+\State $\textit{in\_winning} \gets \Phi_h(x_D, y_D, v_{D,x}, v_{D,y}, x_A, y_A) \leq 0$ \Comment{Check winning region}
 \State Compute relative state $(x_\text{rel}, y_\text{rel}, v_{D,x}, v_{D,y})$
 \State Look up $\mathcal{B}_h(x_\text{rel}, y_\text{rel}, v_{D,x}, v_{D,y})$
 \If{NOT in $\mathcal{B}_h$}
-    \State $(u_x, u_y) \gets$ optimal reaching control from $\nabla\Phi_h$ \Comment{Mode: REACHING}
+    \If{$\textit{in\_winning}$}
+        \State $(u_x, u_y) \gets$ optimal reaching control from $\nabla\Phi_h$ \Comment{Mode: REACHING}
+    \Else
+        \State $(u_x, u_y) \gets \text{PID}(x_A - x_D, y_A - y_D)$ \Comment{Mode: PID\_PURSUIT}
+    \EndIf
 \ElsIf{deep inside $\mathcal{B}_h$}
-    \State $(u_x, u_y) \gets \text{PID}(x_A - x_D, y_A - y_D)$ \Comment{Mode: PID}
+    \State $(u_x, u_y) \gets \text{PID}(x_A - x_D, y_A - y_D)$ \Comment{Mode: PID\_DEEP}
 \Else
     \State $(u_x, u_y) \gets$ optimal tracking control from $\nabla V_{h,T}$ \Comment{Mode: TRACKING}
 \EndIf
@@ -512,7 +569,7 @@ Key topics:
     \item \texttt{/defender/state} (\texttt{PoseStamped}) --- defender position from ground truth
     \item \texttt{/attacker/state} (\texttt{PoseStamped}) --- attacker position
     \item \texttt{/defender/cmd\_vel} (\texttt{Twist}) --- velocity command to PX4/Crazyflie
-    \item \texttt{/game/status} (\texttt{String}) --- game status (CAPTURED, DEFENDER\_WINNING, etc.)
+    \item \texttt{/game/status} (\texttt{String}) --- game status and mode, e.g.\ \texttt{DEFENDER\_WINNING | z:tracking h:pid\_pursuit | d\_h=4.32 d\_z=0.12}
     \item \texttt{/safety/emergency} (\texttt{Bool}) --- emergency landing trigger
 \end{itemize}
 
@@ -650,7 +707,8 @@ This generates 10 figures corresponding to Figures 4--12 of the paper: $\mathcal
 cd /workspace/reach_avoid_game
 python3 -m pytest tests/ -v
 
-# 60 tests covering:
+# 60 tests in reach_avoid_game + 31 in reach_avoid_controller = 91 total
+# Covering:
 #   - Grid dimensions and value function shapes
 #   - Phi_z properties (monotonicity, sign conventions)
 #   - B_z non-emptiness and center containment
@@ -780,8 +838,10 @@ When the simulation is running correctly:
     \item \textbf{Defender} spawns at $(5, 12.5, 3)$ and uses the \textbf{reach-track controller}:
     \begin{itemize}[noitemsep]
         \item Loads precomputed value functions ($\Phi_z$, $V_{z,\infty}$, $\mathcal{B}_z$, $\Phi_h$, $V_{h,T}$, $\mathcal{B}_h$)
-        \item Computes optimal velocity via value function gradients (Algorithm 1 + 2)
-        \item Velocity clamped to 1.5\,m/s horizontal, 1.0\,m/s vertical for PX4 stability
+        \item Checks if current state is in the defender's \textbf{winning region} ($\Phi \leq 0$)
+        \item If in winning region: computes optimal velocity via value function gradients (Algorithm 1 + 2)
+        \item If outside winning region: uses \textbf{PID pursuit} --- proportional control driving directly toward the attacker
+        \item Velocity clamped to $U_D^h = 6.0$\,m/s horizontal, $U_D^z = 4.0$\,m/s vertical (matching game parameters)
     \end{itemize}
 
     \item \textbf{Game outcome}: the defender attempts to intercept the attacker before it reaches the target region $x \in [38,45]$, $y \in [10,15]$. Capture occurs when horizontal distance $\leq 3$\,m \textbf{and} vertical distance $\leq 1$\,m (cylindrical capture zone).
@@ -864,7 +924,7 @@ The PX4 adapter translates velocity commands to PX4 offboard control:
 
 \begin{itemize}[noitemsep]
     \item Subscribes to \texttt{/defender/cmd\_vel} (or \texttt{/attacker/cmd\_vel})
-    \item Clamps velocities to 1.5\,m/s horizontal, 1.0\,m/s vertical for flight stability
+    \item Clamps velocities to $U_D^h = 6.0$\,m/s horizontal, $U_D^z = 4.0$\,m/s vertical (matching game parameters)
     \item Converts ENU to NED and publishes \texttt{TrajectorySetpoint} + \texttt{OffboardControlMode}
     \item Auto-engages offboard mode and force-arms PX4 after GPS convergence ($\sim$15\,s)
 \end{itemize}
@@ -1055,6 +1115,43 @@ The proportional gains ($k_x$, $k_y$, $k_z$) model the Crazyflie's velocity resp
 
 
 %=============================================================================
+\section{End-to-End Simulation Results}
+%=============================================================================
+
+The defender interception logic has been validated using a standalone kinematic simulation (\texttt{tests/integration/test\_kinematic\_game.py}) that replicates the full ROS\,2 kinematic game without requiring ROS\,2 or Gazebo. The simulation uses:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Kinematic simulator}: simple velocity integration with arena bounds clamping (matching \texttt{kinematic\_sim\_node.py})
+    \item \textbf{Defender}: double integrator dynamics ($\dot{v} = K(u - v)$, gains from \texttt{game\_params.yaml})
+    \item \textbf{Attacker}: single integrator with scripted waypoint following at 1.6\,m/s
+    \item \textbf{Capture condition}: horizontal distance $\leq 3$\,m and vertical distance $\leq 1$\,m
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{End-to-end simulation results (all scenarios captured successfully).}
+\begin{tabular}{lccl}
+\toprule
+\textbf{Scenario} & \textbf{Capture Time} & \textbf{Initial Separation} & \textbf{Notes} \\
+\midrule
+Paper initial conditions & 1.4\,s & 7.5\,m & D at $(5, 12.5, 3)$, A at $(5, 20, 3)$ \\
+Attacker ahead, straight line & 4.6\,s & 15.0\,m & A heading directly to target \\
+Attacker around obstacle & 1.8\,s & 7.0\,m & A navigating below obstacle \\
+Altitude difference & 3.5\,s & 12.0\,m ($z$) & D at $z{=}3$, A at $z{=}15$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In all scenarios, the defender uses \textbf{PID pursuit} mode (outside the winning region on the dev grid) and successfully intercepts the attacker. The controller transitions to \textbf{tracking} mode as the vertical relative state enters the invariant set $\mathcal{B}_z$.
+
+\begin{lstlisting}[style=bashstyle, title=\textbf{Running the standalone simulation}]
+# No ROS2 needed --- runs in pure Python with value functions
+cd /workspace
+python3 tests/integration/test_kinematic_game.py
+\end{lstlisting}
+
+
+%=============================================================================
 \section{Troubleshooting}
 %=============================================================================
 
@@ -1086,8 +1183,11 @@ The proportional gains ($k_x$, $k_y$, $k_z$) model the Crazyflie's velocity resp
     \item[\texttt{/defender/state} or \texttt{/attacker/state} hangs (no data)]
     The ground truth relay is not receiving PX4 position data. Check: (1)~\texttt{px4\_msgs} is importable --- the Dockerfile sets \texttt{PYTHONPATH} to include the px4\_ros\_ws install; (2)~PX4 local position topic is publishing: \texttt{ros2 topic hz /defender/fmu/out/vehicle\_local\_position\_v1}; (3)~the node is running: \texttt{ros2 node list} should show \texttt{/ground\_truth\_relay}.
 
+    \item[Defender flies away from attacker instead of toward it]
+    On coarse grids (dev preset), the 6D value function $\Phi_h$ may not resolve the capture set --- $\Phi_h > 0$ everywhere, and gradients point in arbitrary directions. \textbf{Solution:} The controller checks if the state is in the winning region ($\Phi \leq 0$) before using HJ optimal control. Outside the winning region, it falls back to PID pursuit. This was fixed in v0.2.0. If you still see wrong-direction behavior, verify value functions were recomputed after the update.
+
     \item[Defender flies out of bounds / unstable flight]
-    The reach-track controller outputs maximum velocity ($U_D = 6$\,m/s), which causes motor saturation in PX4's x500 model. The PX4 adapter clamps velocities (1.5\,m/s horizontal, 1.0\,m/s vertical). If the defender still flies erratically, reduce these clamp values or use the kinematic simulation mode.
+    The reach-track controller outputs maximum velocity ($U_D^h = 6$\,m/s), which may cause motor saturation in PX4's x500 model. The PX4 adapter now clamps velocities to the game parameters (6.0\,m/s horizontal, 4.0\,m/s vertical). For real hardware or if PX4 is unstable, reduce these values in the PX4 adapter's \texttt{max\_h} / \texttt{max\_v} constants or use the kinematic simulation mode.
 
     \item[Drones arm but immediately disarm]
     PX4's auto preflight disarm triggers if no takeoff occurs within the timeout. Set \texttt{COM\_DISARM\_PRFLT=$-1$} to disable. Also ensure offboard mode is engaged \textbf{before} arming --- the adapter sends 40 setpoints, engages offboard, waits 20 more setpoints, then arms.
@@ -1101,7 +1201,9 @@ The proportional gains ($k_x$, $k_y$, $k_z$) model the Crazyflie's velocity resp
 \begin{enumerate}
     \item M.~Bui, S.~Monckton, and M.~Chen, ``Reach-Avoid Differential Game with Reachability Analysis for UAVs --- A Decomposition Approach,'' \textit{arXiv preprint arXiv:2512.22793}, Dec.~2025.
 
-    \item \texttt{hj\_reachability}: \url{https://github.com/StanfordASL/hj_reachability} --- JAX-based Hamilton-Jacobi reachability library (v0.7.0).
+    \item \texttt{hj\_reachability}: \url{https://github.com/StanfordASL/hj_reachability} --- JAX-based Hamilton-Jacobi reachability library (v0.7.0). Used as the numerical backend for the OptimizedDP-compatible solver.
+
+    \item M.~Bui, A.~Brandao~Araujo, and M.~Chen, ``OptimizedDP: An Efficient, User-friendly Library For Optimal Control and Dynamic Programming,'' \textit{arXiv preprint arXiv:2204.05520}, 2022. \url{https://github.com/SFU-MARS/optimized_dp}. The API design for our solver layer follows this library's conventions.
 
     \item PX4 Autopilot: \url{https://github.com/PX4/PX4-Autopilot} --- Open-source flight controller.
 
