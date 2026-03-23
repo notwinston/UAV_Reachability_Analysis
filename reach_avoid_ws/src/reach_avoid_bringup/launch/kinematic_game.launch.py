@@ -34,7 +34,7 @@ def generate_launch_description():
 
     # Launch arguments
     attacker_mode_arg = DeclareLaunchArgument(
-        'attacker_mode', default_value='scripted')
+        'attacker_mode', default_value='optimal')
     vf_dir_arg = DeclareLaunchArgument(
         'value_function_dir', default_value=vf_default)
     gp_arg = DeclareLaunchArgument(

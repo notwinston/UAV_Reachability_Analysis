@@ -28,7 +28,7 @@ def main(args=None):
                 super().__init__('attacker_controller')
 
                 # Parameters
-                self.declare_parameter('mode', 'scripted')
+                self.declare_parameter('mode', 'optimal')
                 self.declare_parameter('max_speed', 0.5)
                 self.declare_parameter('speed_fraction', 0.8)
                 self.declare_parameter('target_x', 7.0)
