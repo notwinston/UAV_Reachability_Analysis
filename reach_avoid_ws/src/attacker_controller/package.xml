@@ -10,6 +10,7 @@
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
+  <exec_depend>reach_avoid_controller</exec_depend>
   <buildtool_depend>ament_python</buildtool_depend>
   <export>
     <build_type>ament_python</build_type>
