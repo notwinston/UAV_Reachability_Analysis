@@ -1,6 +1,7 @@
 """Kinematic drone simulator - bypasses PX4 entirely.
 
-Simple velocity integration: position += velocity * dt.
+Defender: double integrator dynamics v_dot = k * (u - v), then pos += v * dt.
+Attacker: single integrator dynamics pos += cmd_vel * dt.
 Subscribes to cmd_vel topics, publishes state and velocity topics.
 No PX4, no arming, no EKF - just demonstrates the reach-avoid algorithms.
 """
@@ -38,7 +39,11 @@ def main(args=None):
                 ]
 
                 self._defender_vel = [0.0, 0.0, 0.0]
+                self._defender_cmd = [0.0, 0.0, 0.0]
                 self._attacker_vel = [0.0, 0.0, 0.0]
+
+                # Defender double-integrator gains (from game_params.yaml)
+                self._k = [0.7, 0.7, 1.5]  # k_x, k_y, k_z
 
                 sim_rate = self.get_parameter('sim_rate').value
                 self._dt = 1.0 / sim_rate
@@ -62,7 +67,7 @@ def main(args=None):
                     f'rate={sim_rate}Hz')
 
             def _def_cmd_cb(self, msg):
-                self._defender_vel = [msg.linear.x, msg.linear.y, msg.linear.z]
+                self._defender_cmd = [msg.linear.x, msg.linear.y, msg.linear.z]
 
             def _att_cmd_cb(self, msg):
                 self._attacker_vel = [msg.linear.x, msg.linear.y, msg.linear.z]
@@ -70,9 +75,15 @@ def main(args=None):
             def _sim_step(self):
                 now = self.get_clock().now()
 
-                # Integrate position
+                # Defender: double integrator dynamics v_dot = k * (u - v)
                 for i in range(3):
-                    self._defender_pos[i] += self._defender_vel[i] * self._dt
+                    self._defender_vel[i] += self._dt * self._k[i] * (self._defender_cmd[i] - self._defender_vel[i])
+                self._defender_pos[0] += self._defender_vel[0] * self._dt
+                self._defender_pos[1] += self._defender_vel[1] * self._dt
+                self._defender_pos[2] += self._defender_vel[2] * self._dt
+
+                # Attacker: single integrator (direct velocity)
+                for i in range(3):
                     self._attacker_pos[i] += self._attacker_vel[i] * self._dt
 
                 # Clamp to arena bounds [0,45] x [0,25] x [0,20]
