@@ -46,7 +46,7 @@ def generate_launch_description():
     # Launch arguments
     attacker_mode_arg = DeclareLaunchArgument(
         'attacker_mode',
-        default_value='scripted',
+        default_value='optimal',
         description='Attacker control mode: scripted, keyboard, optimal, switchable',
     )
 
