@@ -36,6 +36,8 @@ def generate_launch_description():
             'target_x': 7.0,
             'target_y': 4.0,
             'target_z': 2.0,
+            'value_function_dir': '/workspace/data/value_functions/',
+            'target_altitude': 10.0,
         }],
         output='screen',
     )
