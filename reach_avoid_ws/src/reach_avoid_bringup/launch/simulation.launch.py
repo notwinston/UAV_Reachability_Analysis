@@ -242,6 +242,8 @@ def generate_launch_description():
             'target_y': 12.5,
             'target_z': 10.0,
             'waypoints': attacker_waypoints,
+            'value_function_dir': '/workspace/data/value_functions/',
+            'target_altitude': 10.0,
         }],
         output='screen',
     )
