@@ -121,7 +121,7 @@
 \textbf{Simulation:} & Gazebo Harmonic + PX4 SITL\\
 \textbf{Hardware:} & Crazyflie 2.1 + Crazyswarm2\\
 \textbf{Middleware:} & ROS\,2 Humble\\
-\textbf{Version:} & 0.2.0\\
+\textbf{Version:} & 0.3.0\\
 \end{tabular}
 
 \vfill
@@ -150,7 +150,7 @@ The implementation spans three layers:
 
 \begin{itemize}
     \item \textbf{Offline computation:} Value functions are solved on a discretized grid using an OptimizedDP-compatible solver API (backed by \texttt{hj\_reachability} with JAX/GPU acceleration). These represent optimal strategies for all possible states.
-    \item \textbf{Online control:} A real-time ROS\,2 controller reads drone states, interpolates precomputed value functions, extracts optimal controls via gradient computation, and publishes velocity commands at 50\,Hz. When outside the proven winning region, a PID pursuit controller drives the defender directly toward the attacker.
+    \item \textbf{Online control:} Real-time ROS\,2 controllers for both drones. The \textbf{defender} reads drone states, interpolates precomputed value functions, extracts optimal controls via gradient computation, and publishes velocity commands at 50\,Hz (with PID pursuit fallback outside the winning region). The \textbf{attacker} uses game-theoretic optimal control by default, extracting bang-bang velocity commands from the same value functions to optimally evade the defender while navigating toward the target.
     \item \textbf{Simulation \& hardware:} The game runs in Gazebo with PX4 autopilot for physics-based validation, as a lightweight kinematic simulation without PX4, or on real Crazyflie~2.1 drones with motion capture for state estimation.
 \end{itemize}
 
@@ -480,7 +480,7 @@ Time slices (for $T_\text{capture}$ extraction) are stored separately as \texttt
 \texttt{reach\_avoid\_bringup} & Launch files, configuration YAML, dependency management \\
 \texttt{reach\_avoid\_sim} & PX4 adapter (MAVLink $\leftrightarrow$ ROS\,2), ground truth relay from Gazebo \\
 \texttt{reach\_avoid\_controller} & Defender controller implementing Algorithms 1 \& 2 with value function lookup \\
-\texttt{attacker\_controller} & Attacker with modes: scripted waypoints, keyboard teleop, optimal escape, switchable \\
+\texttt{attacker\_controller} & Attacker with modes: optimal (default, HJ bang-bang control), scripted waypoints, keyboard teleop, switchable \\
 \texttt{reach\_avoid\_viz} & MarkerArray publisher for obstacles, target, capture zones in RViz \\
 \texttt{reach\_avoid\_hw} & Crazyswarm2 adapter for Crazyflie drones, safety monitor \\
 \bottomrule
@@ -538,6 +538,47 @@ The \textbf{winning region guard} ($\Phi \leq 0$ check) is critical for robustne
 \State \Return $(u_x, u_y)$
 \end{algorithmic}
 \end{algorithm}
+
+\subsubsection{Attacker Controller Node}
+
+The \texttt{AttackerControllerNode} runs at 20\,Hz and supports multiple control modes. The default mode is \texttt{optimal}, which implements game-theoretic bang-bang control using Hamilton-Jacobi value function gradients.
+
+\paragraph{Optimal Control Mode.}
+The attacker acts as the \textbf{disturbance} player in the HJ game formulation, minimizing the value function to optimally evade the defender while heading toward the target. The control law is bang-bang (always at maximum speed):
+
+\begin{align}
+d_x^* &= -U_A^h \cdot \text{sign}\!\left(\frac{\partial \Phi_h}{\partial x_A}\right), &
+d_y^* &= -U_A^h \cdot \text{sign}\!\left(\frac{\partial \Phi_h}{\partial y_A}\right) \label{eq:attacker-horiz}\\[4pt]
+d_z^* &= -U_A^z \cdot \text{sign}\!\left(\frac{\partial \Phi_z}{\partial z_A}\right) \label{eq:attacker-vert}
+\end{align}
+
+where:
+\begin{itemize}[noitemsep]
+    \item $\Phi_h$ is the 6D horizontal game value function with state $[x_D, y_D, v_{D,x}, v_{D,y}, x_A, y_A]$
+    \item $\Phi_z$ is the 3D vertical game value function with state $[z_D, v_{D,z}, z_A]$
+    \item $U_A^h = 3.0$\,m/s (max horizontal speed), $U_A^z = 2.0$\,m/s (max vertical speed)
+    \item Gradients at indices 4,\,5 (for $x_A, y_A$) and index 2 (for $z_A$) respectively
+\end{itemize}
+
+The negative sign reflects the attacker's role as the \textbf{minimizer} in the game (opposite to the defender, who maximizes). This ensures the attacker moves in the direction that most decreases the value function, corresponding to the worst-case disturbance from the defender's perspective.
+
+\paragraph{Fallback Behavior.}
+If the value function gradient is near-zero (e.g., at grid boundaries) or the defender's state is not yet available, the attacker falls back to \textbf{simple goal-seeking}: a unit direction vector toward the target center $(41.5, 12.5)$ scaled to $U_A^h$, with proportional altitude control toward the target altitude.
+
+\paragraph{State Subscriptions.}
+In optimal mode, the attacker subscribes to the defender's state in addition to its own:
+\begin{itemize}[noitemsep]
+    \item \texttt{/attacker/state}, \texttt{/attacker/velocity} --- own position and velocity
+    \item \texttt{/defender/state}, \texttt{/defender/velocity} --- defender position and velocity (required for the 6D $\Phi_h$ and 3D $\Phi_z$ lookups)
+\end{itemize}
+This matches the paper's \textbf{perfect information} assumption: both players know each other's full state.
+
+\paragraph{Other Modes.}
+\begin{itemize}[noitemsep]
+    \item \texttt{scripted} --- follows predefined waypoints toward target at constant speed
+    \item \texttt{keyboard} --- manual control via \texttt{teleop\_twist\_keyboard}
+    \item \texttt{switchable} --- start in scripted, switch at runtime via \texttt{/attacker/set\_mode} service
+\end{itemize}
 
 \subsubsection{ROS\,2 Topic Architecture}
 
@@ -827,13 +868,15 @@ docker-compose -f docker-compose.sim.yml down
 When the simulation is running correctly:
 
 \begin{enumerate}
-    \item \textbf{Attacker} spawns at $(5, 20, 3)$ and follows 6 waypoints:
+    \item \textbf{Attacker} spawns at $(5, 20, 3)$ and uses \textbf{optimal game-theoretic control} by default:
     \begin{itemize}[noitemsep]
-        \item $(5, 12.5, 10) \to (12, 12.5, 10)$: approach obstacle
-        \item $(12, 3, 10) \to (25, 3, 10)$: route around obstacle below $y=5$
-        \item $(25, 12.5, 10) \to (41.5, 12.5, 10)$: re-center and reach target
+        \item Loads $\Phi_h$ and $\Phi_z$ value functions, subscribes to defender state
+        \item Extracts bang-bang controls from value function gradients (Eqs.~\ref{eq:attacker-horiz}--\ref{eq:attacker-vert})
+        \item Flies at maximum speed: $U_A^h = 3.0$\,m/s horizontal, $U_A^z = 2.0$\,m/s vertical
+        \item Actively evades the defender while navigating toward the target region
+        \item Obstacle avoidance is implicit in the $\Phi_h$ value function (reach-avoid formulation)
     \end{itemize}
-    Speed: 1.6\,m/s ($= 2.0 \times 0.8$ speed fraction). Reaches target in $\sim$30--40\,s of flight.
+    If launched with \texttt{attacker\_mode:=scripted}, it instead follows 6 waypoints at 1.6\,m/s.
 
     \item \textbf{Defender} spawns at $(5, 12.5, 3)$ and uses the \textbf{reach-track controller}:
     \begin{itemize}[noitemsep]
@@ -850,11 +893,16 @@ When the simulation is running correctly:
 \subsection{Attacker Control Modes}
 
 \begin{itemize}[noitemsep]
-    \item \texttt{scripted} (default) --- follows predefined waypoints toward target
+    \item \texttt{optimal} \textbf{(default)} --- game-theoretic HJ bang-bang control using $\Phi_h$ and $\Phi_z$ gradients. The attacker minimizes the game value function, yielding the optimal evasion strategy from the paper. Requires precomputed value functions and defender state access.
+    \item \texttt{scripted} --- follows predefined waypoints toward target at constant speed (1.6\,m/s)
     \item \texttt{keyboard} --- manual control via \texttt{teleop\_twist\_keyboard}
-    \item \texttt{optimal} --- uses value function gradient for optimal escape (stub)
-    \item \texttt{switchable} --- switch between modes at runtime via ROS\,2 service
+    \item \texttt{switchable} --- start in scripted, switch at runtime via \texttt{/attacker/set\_mode} service
 \end{itemize}
+
+To override the default mode in any launch file:
+\begin{lstlisting}[style=bashstyle]
+ros2 launch reach_avoid_bringup full_game.launch.py attacker_mode:=scripted
+\end{lstlisting}
 
 \subsection{Architecture Details}
 
@@ -1035,7 +1083,7 @@ source /workspace/reach_avoid_ws/install/setup.bash
 
 # Terminal 2: Launch the hardware game
 ros2 launch reach_avoid_bringup hardware.launch.py \
-    attacker_mode:=scripted \
+    attacker_mode:=optimal \
     value_function_dir:=/workspace/data/value_functions/ \
     defender_uri:=radio://0/80/2M/E7E7E7E701 \
     attacker_uri:=radio://0/80/2M/E7E7E7E702 \
@@ -1118,18 +1166,20 @@ The proportional gains ($k_x$, $k_y$, $k_z$) model the Crazyflie's velocity resp
 \section{End-to-End Simulation Results}
 %=============================================================================
 
-The defender interception logic has been validated using a standalone kinematic simulation (\texttt{tests/integration/test\_kinematic\_game.py}) that replicates the full ROS\,2 kinematic game without requiring ROS\,2 or Gazebo. The simulation uses:
+The game has been validated using a standalone kinematic simulation (\texttt{tests/integration/test\_kinematic\_game.py}) that replicates the full ROS\,2 kinematic game without requiring ROS\,2 or Gazebo. The simulation uses:
 
 \begin{itemize}[noitemsep]
     \item \textbf{Kinematic simulator}: simple velocity integration with arena bounds clamping (matching \texttt{kinematic\_sim\_node.py})
-    \item \textbf{Defender}: double integrator dynamics ($\dot{v} = K(u - v)$, gains from \texttt{game\_params.yaml})
-    \item \textbf{Attacker}: single integrator with scripted waypoint following at 1.6\,m/s
+    \item \textbf{Defender}: double integrator dynamics with reach-track control ($\dot{v} = K(u - v)$, gains from \texttt{game\_params.yaml})
+    \item \textbf{Attacker}: single integrator with either scripted waypoint following (1.6\,m/s) or optimal bang-bang control (3.0\,m/s)
     \item \textbf{Capture condition}: horizontal distance $\leq 3$\,m and vertical distance $\leq 1$\,m
 \end{itemize}
 
+\subsubsection{Scripted Attacker Scenarios}
+
 \begin{table}[h]
 \centering
-\caption{End-to-end simulation results (all scenarios captured successfully).}
+\caption{Defender vs.\ scripted attacker (all scenarios captured successfully).}
 \begin{tabular}{lccl}
 \toprule
 \textbf{Scenario} & \textbf{Capture Time} & \textbf{Initial Separation} & \textbf{Notes} \\
@@ -1142,7 +1192,50 @@ Altitude difference & 3.5\,s & 12.0\,m ($z$) & D at $z{=}3$, A at $z{=}15$ \\
 \end{tabular}
 \end{table}
 
-In all scenarios, the defender uses \textbf{PID pursuit} mode (outside the winning region on the dev grid) and successfully intercepts the attacker. The controller transitions to \textbf{tracking} mode as the vertical relative state enters the invariant set $\mathcal{B}_z$.
+\subsubsection{Optimal Attacker Scenario}
+
+When the attacker uses game-theoretic optimal control, the game becomes significantly more competitive. The attacker applies bang-bang controls from $\Phi_h$ and $\Phi_z$ gradients, flying at maximum speed (3.0\,m/s horizontal, 2.0\,m/s vertical) and actively evading the defender:
+
+\begin{table}[h]
+\centering
+\caption{Defender vs.\ optimal attacker.}
+\begin{tabular}{lccl}
+\toprule
+\textbf{Scenario} & \textbf{Capture Time} & \textbf{Initial Separation} & \textbf{Notes} \\
+\midrule
+Optimal attacker vs.\ optimal defender & 4.2\,s & 7.5\,m & D at $(5, 12.5, 3)$, A at $(5, 20, 3)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Optimal Attacker Behavior Validation}
+
+The test suite includes dedicated behavioral assertions that verify the optimal controller works correctly:
+
+\begin{table}[h]
+\centering
+\caption{Optimal attacker behavior validation results.}
+\begin{tabular}{lll}
+\toprule
+\textbf{Check} & \textbf{Expected} & \textbf{Measured} \\
+\midrule
+Average horizontal speed & $> 1.0$\,m/s & 4.24\,m/s \\
+Commands at near-max speed ($\geq U_A^h$) & $> 50\%$ & 100\% \\
+X-axis progress in 5\,s & $> 3.0$\,m & 12.3\,m \\
+Altitude after 5\,s (from $z = 3$) & $> 4.0$\,m & 10.0\,m \\
+Path divergence from scripted (5\,s) & $> 1.0$\,m & 13.3\,m \\
+Evasion reaction to defender position & Y-command differs & $\Delta = 6.0$\,m/s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+\begin{itemize}[noitemsep]
+    \item The optimal attacker flies at \textbf{bang-bang speed} (100\% of commands at $U_A^h = 3.0$\,m/s per axis, yielding $\sim$4.24\,m/s diagonal).
+    \item It makes rapid progress toward the target (\textbf{12.3\,m} of x-progress in 5\,s).
+    \item Its path \textbf{diverges by 13.3\,m} from the scripted waypoint path after 5\,s --- it is using a fundamentally different, game-theoretically optimal trajectory.
+    \item When the defender changes position (above vs.\ below), the attacker's y-command reverses by \textbf{6.0\,m/s} --- a full bang-bang sign flip, demonstrating active evasion.
+\end{itemize}
 
 \begin{lstlisting}[style=bashstyle, title=\textbf{Running the standalone simulation}]
 # No ROS2 needed --- runs in pure Python with value functions
