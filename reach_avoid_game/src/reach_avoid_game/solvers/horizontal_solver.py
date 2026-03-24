@@ -69,6 +69,50 @@ def _make_wall_avoid_set(grid: Grid, config: GameConfig, margin: float = 0.5) ->
     return wall_sdf
 
 
+def _make_attacker_wall_avoid_set(grid: Grid, config: GameConfig, margin: float = 0.5) -> np.ndarray:
+    """Create arena wall avoid set SDF for attacker position in 6D grid.
+
+    Per Paper Eq. 20b: A_h includes {x_A^h in Omega_obs}.
+    Uses grid indices 4 (x_A) and 5 (y_A).
+    """
+    shape = tuple(grid.pts_each_dim)
+    ones = np.ones(shape)
+    x_a = grid.vs[4] * ones
+    y_a = grid.vs[5] * ones
+
+    wall_x_min = x_a - config.room.x_min - margin
+    wall_x_max = config.room.x_max - x_a - margin
+    wall_y_min = y_a - config.room.y_min - margin
+    wall_y_max = config.room.y_max - y_a - margin
+
+    wall_sdf = np.minimum(np.minimum(wall_x_min, wall_x_max),
+                          np.minimum(wall_y_min, wall_y_max))
+    return wall_sdf
+
+
+def _make_attacker_obstacle_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray:
+    """Create combined obstacle + wall avoid set for attacker position in 6D grid.
+
+    Per Paper Eq. 20b: A_h includes {x_A^h in Omega_obs}.
+    """
+    combined = _make_attacker_wall_avoid_set(grid, config)
+
+    if config.obstacles:
+        shape = tuple(grid.pts_each_dim)
+        ones = np.ones(shape)
+        x_a = grid.vs[4] * ones
+        y_a = grid.vs[5] * ones
+
+        for obs in config.obstacles:
+            sdf = np.maximum(
+                np.maximum(obs.x_min - x_a, x_a - obs.x_max),
+                np.maximum(obs.y_min - y_a, y_a - obs.y_max),
+            )
+            combined = np.minimum(combined, sdf)
+
+    return combined
+
+
 def _make_obstacle_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray:
     """Create combined obstacle + wall avoid set for the 6D horizontal game.
 
@@ -183,6 +227,11 @@ def solve_horizontal_reach_avoid(
         print("  Using B_h feedback in avoid set per Paper Eq. 39")
     else:
         obstacle_values = _make_obstacle_avoid_set(grid, config)
+
+    # Add attacker wall/obstacle avoidance per Paper Eq. 20b: {x_A^h in Omega_obs}
+    attacker_obstacles = _make_attacker_obstacle_avoid_set(grid, config)
+    obstacle_values = np.minimum(obstacle_values, attacker_obstacles)
+    print("  Added attacker wall/obstacle avoidance per Paper Eq. 20b")
 
     # Time horizon
     T = 10.0 if preset == "dev" else 22.0
