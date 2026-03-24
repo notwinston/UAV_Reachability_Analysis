@@ -45,29 +45,50 @@ def _make_horizontal_capture_set(grid: Grid, d_h: float) -> np.ndarray:
     return dist - d_h
 
 
-def _make_obstacle_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray | None:
-    """Create obstacle avoid set for the 6D horizontal game.
+def _make_wall_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray:
+    """Create arena wall avoid set SDF for defender position in 6D grid.
 
-    Uses defender position (x_D, y_D).
-    SDF: negative inside obstacle, positive outside.
+    SDF convention: negative inside wall (avoid), positive outside (safe).
+    The SDF is the signed distance to the nearest arena boundary.
     """
-    if not config.obstacles:
-        return None
-
     shape = tuple(grid.pts_each_dim)
     ones = np.ones(shape)
     x_d = grid.vs[0] * ones
     y_d = grid.vs[1] * ones
 
-    combined = None
-    for obs in config.obstacles:
-        sdf = np.maximum(
-            np.maximum(obs.x_min - x_d, x_d - obs.x_max),
-            np.maximum(obs.y_min - y_d, y_d - obs.y_max),
-        )
-        if combined is None:
-            combined = sdf
-        else:
+    # SDF for each wall (positive = safe distance from wall, negative = inside wall)
+    wall_x_min = x_d - config.room.x_min
+    wall_x_max = config.room.x_max - x_d
+    wall_y_min = y_d - config.room.y_min
+    wall_y_max = config.room.y_max - y_d
+
+    # Combined: min of all distances (closest wall)
+    wall_sdf = np.minimum(np.minimum(wall_x_min, wall_x_max),
+                          np.minimum(wall_y_min, wall_y_max))
+    return wall_sdf
+
+
+def _make_obstacle_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray:
+    """Create combined obstacle + wall avoid set for the 6D horizontal game.
+
+    Always returns a value (walls always exist). SDF convention:
+    negative inside obstacle/wall (avoid), positive outside (safe).
+    """
+    # Start with arena wall SDF
+    combined = _make_wall_avoid_set(grid, config)
+
+    # Add obstacle SDFs
+    if config.obstacles:
+        shape = tuple(grid.pts_each_dim)
+        ones = np.ones(shape)
+        x_d = grid.vs[0] * ones
+        y_d = grid.vs[1] * ones
+
+        for obs in config.obstacles:
+            sdf = np.maximum(
+                np.maximum(obs.x_min - x_d, x_d - obs.x_max),
+                np.maximum(obs.y_min - y_d, y_d - obs.y_max),
+            )
             combined = np.minimum(combined, sdf)
 
     return combined
@@ -128,11 +149,7 @@ def _make_avoid_set_with_Bh(
     l_bh_complement = d_h_effective - v_h_t_values
 
     obstacle_values = _make_obstacle_avoid_set(grid, config)
-
-    if obstacle_values is not None:
-        combined = np.minimum(np.asarray(obstacle_values), l_bh_complement)
-    else:
-        combined = l_bh_complement
+    combined = np.minimum(np.asarray(obstacle_values), l_bh_complement)
 
     return combined
 
@@ -175,19 +192,15 @@ def solve_horizontal_reach_avoid(
     print(f"Solving horizontal reach-avoid game (6D grid: {tuple(grid.pts_each_dim)})...")
     print(f"  Time horizon: T={T}s, steps: {n_steps}")
 
-    if obstacle_values is not None:
-        # Reach-avoid: use target and obstacle
-        compMethod = {
-            "TargetSetMode": "minVWithV0",
-            "ObstacleSetMode": "maxVWithObstacle",
-        }
-        result = HJSolver(
-            dynamics, grid, [target_values, -obstacle_values],
-            tau, compMethod, accuracy="low",
-        )
-    else:
-        compMethod = {"TargetSetMode": "minVWithV0"}
-        result = HJSolver(dynamics, grid, target_values, tau, compMethod, accuracy="low")
+    # Reach-avoid: use target and obstacle (walls + obstacles always present)
+    compMethod = {
+        "TargetSetMode": "minVWithV0",
+        "ObstacleSetMode": "maxVWithObstacle",
+    }
+    result = HJSolver(
+        dynamics, grid, [target_values, -obstacle_values],
+        tau, compMethod, accuracy="low",
+    )
 
     phi_h = result
 
