@@ -1,0 +1,230 @@
+You are iterating on a reach-avoid differential game project. The value functions must be recomputed to include arena walls and obstacles in the defender's avoid set, using the "medium" grid preset for ~2x resolution improvement.
+
+## Cold Start — Orientation Checklist
+
+Before starting any work, run these checks to determine your current state:
+
+1. `git log --oneline -8` — see what has been committed (Wave 1 safety layer should already be done)
+2. `ls -la /workspace/data/value_functions/` — check current VF files and dates
+3. `grep -n "wall_sdf\|arena_wall\|defender_wall" /workspace/reach_avoid_game/src/reach_avoid_game/solvers/horizontal_solver.py` — check if wall SDFs already added
+4. `grep -n "wall_sdf\|arena_wall\|defender_wall" /workspace/reach_avoid_game/src/reach_avoid_game/solvers/vertical_solver.py` — check vertical too
+5. `/workspace/.venv/bin/python -c "from reach_avoid_game.config import GameConfig; c = GameConfig.from_yaml('/workspace/config/game_params.yaml'); print('preset:', c.grid_preset); print('h_grid:', c.grid.horizontal.game_x_points, c.grid.horizontal.game_y_points)"` — verify config loads
+
+Based on these results, identify the first incomplete phase and begin there.
+
+## Shared Context from Wave 1
+
+The defender controller in `/workspace/reach_avoid_ws/src/reach_avoid_controller/reach_avoid_controller/defender_node.py` already has a `_apply_wall_avoidance()` safety layer from Wave 1. This Wave 2 fixes the root cause: the value functions themselves don't account for arena walls or obstacles for the defender.
+
+## Architecture Overview
+
+**Value function computation order:**
+1. V_z_inf (2D vertical relative) → B_z → phi_z (3D vertical game)
+2. V_h_T (4D horizontal relative) → B_h → phi_A_reach (2D) → phi_h (6D horizontal game)
+
+**Key files:**
+- `/workspace/reach_avoid_game/src/reach_avoid_game/solvers/horizontal_solver.py` — horizontal VF solver
+- `/workspace/reach_avoid_game/src/reach_avoid_game/solvers/vertical_solver.py` — vertical VF solver
+- `/workspace/reach_avoid_game/src/reach_avoid_game/solvers/grid_utils.py` — grid creation
+- `/workspace/reach_avoid_game/src/reach_avoid_game/config.py` — GameConfig with RoomConfig, ObstacleConfig
+- `/workspace/config/game_params.yaml` — YAML config with grid presets (dev, medium, paper)
+- `/workspace/reach_avoid_game/scripts/compute_vertical.py` — CLI to run vertical pipeline
+- `/workspace/reach_avoid_game/scripts/compute_horizontal.py` — CLI to run horizontal pipeline
+
+## Requirements
+
+### Phase 1: Add wall SDFs to horizontal solver's avoid set
+
+**File:** `/workspace/reach_avoid_game/src/reach_avoid_game/solvers/horizontal_solver.py`
+
+The `_make_obstacle_avoid_set()` function (lines 48-73) currently only adds obstacle boxes. Modify it to ALSO add arena wall SDFs for the defender position (x_D, y_D).
+
+Add a new function `_make_wall_avoid_set(grid: Grid, config: GameConfig)` that creates SDFs for the 4 arena walls:
+```python
+def _make_wall_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray:
+    """Create arena wall avoid set SDF for defender position in 6D grid.
+
+    SDF convention: negative inside wall (avoid), positive outside (safe).
+    """
+    shape = tuple(grid.pts_each_dim)
+    ones = np.ones(shape)
+    x_d = grid.vs[0] * ones  # defender x position
+    y_d = grid.vs[1] * ones  # defender y position
+
+    # SDF for each wall (positive = safe, negative = inside wall)
+    wall_x_min = x_d - config.room.x_min   # distance from left wall
+    wall_x_max = config.room.x_max - x_d   # distance from right wall
+    wall_y_min = y_d - config.room.y_min   # distance from bottom wall
+    wall_y_max = config.room.y_max - y_d   # distance from top wall
+
+    # Combined: min of all distances (closest wall)
+    # This is the SDF of the interior of the arena
+    # Negative when outside arena (in a wall), positive when inside
+    wall_sdf = np.minimum(np.minimum(wall_x_min, wall_x_max),
+                          np.minimum(wall_y_min, wall_y_max))
+    return wall_sdf
+```
+
+Then modify `_make_obstacle_avoid_set()` to COMBINE wall SDFs with obstacle SDFs:
+```python
+def _make_obstacle_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray | None:
+    """Create combined obstacle + wall avoid set for the 6D horizontal game."""
+    wall_sdf = _make_wall_avoid_set(grid, config)
+
+    # Start with walls
+    combined = wall_sdf
+
+    # Add obstacles
+    x_d = grid.vs[0] * np.ones(tuple(grid.pts_each_dim))
+    y_d = grid.vs[1] * np.ones(tuple(grid.pts_each_dim))
+    for obs in config.obstacles:
+        sdf = np.maximum(
+            np.maximum(obs.x_min - x_d, x_d - obs.x_max),
+            np.maximum(obs.y_min - y_d, y_d - obs.y_max),
+        )
+        combined = np.minimum(combined, sdf)
+
+    return combined
+```
+
+IMPORTANT: The function should now ALWAYS return a value (never None) because walls always exist. Update the call sites in `solve_horizontal_reach_avoid()` accordingly — `obstacle_values` will never be None.
+
+Also update `_make_avoid_set_with_Bh()` to include walls in its combined avoid set.
+
+**State check:** `grep -n "wall_sdf\|_make_wall" /workspace/reach_avoid_game/src/reach_avoid_game/solvers/horizontal_solver.py`
+**Verify:** `/workspace/.venv/bin/python -c "from reach_avoid_game.solvers.horizontal_solver import _make_wall_avoid_set; print('wall SDF function exists')"`
+**Git:** `git add /workspace/reach_avoid_game/src/reach_avoid_game/solvers/horizontal_solver.py && git commit -m "feat: add arena wall SDFs to horizontal solver avoid set"`
+
+### Phase 2: Add wall awareness to V_h_T obstacle penalties
+
+**File:** `/workspace/reach_avoid_game/src/reach_avoid_game/solvers/horizontal_solver.py`
+
+The `solve_horizontal_max_distance_6d()` function (line 410+) adds obstacle penalties to the initial distance values. Add wall penalties too:
+
+In the obstacle penalty section, add wall penalties:
+```python
+# Wall penalty for defender: large penalty when defender is near/in walls
+wall_sdf = _make_wall_avoid_set(grid, config)
+wall_penalty = np.where(wall_sdf < 0, 1000.0, 0.0)
+initial_values = initial_values + wall_penalty
+```
+
+For the 4D relative `solve_horizontal_max_distance()`, walls don't apply directly (relative coordinates), so no change needed there.
+
+**State check:** `grep -n "wall_penalty" /workspace/reach_avoid_game/src/reach_avoid_game/solvers/horizontal_solver.py`
+**Verify:** Read the file and confirm wall penalties are added.
+**Git:** `git add /workspace/reach_avoid_game/src/reach_avoid_game/solvers/horizontal_solver.py && git commit -m "feat: add wall penalties to V_h_T_6d initial values"`
+
+### Phase 3: Verify compute pipeline works end-to-end
+
+Before recomputing, verify the pipeline runs.
+
+First, back up existing value functions:
+```bash
+cp -r /workspace/data/value_functions/ /workspace/data/value_functions_backup/
+```
+
+Test the vertical pipeline (smaller, faster):
+```bash
+cd /workspace && /workspace/.venv/bin/python -m reach_avoid_game.scripts.compute_vertical --preset dev --config /workspace/config/game_params.yaml --output-dir /workspace/data/value_functions/ 2>&1 | tail -20
+```
+
+If this fails, debug and fix. Common issues:
+- Import errors in reach_avoid_game package
+- Missing PYTHONPATH (add `/workspace/reach_avoid_game/src` to sys.path)
+- NumPy/SciPy version issues
+
+**Verify:** Vertical pipeline completes without errors. Check that `phi_z.npz`, `V_z_inf.npz`, `B_z.npz` are updated.
+**Git:** `git commit -m "chore: verify vertical compute pipeline works" --allow-empty` (or commit any fixes)
+
+### Phase 4: Recompute ALL value functions with medium preset
+
+Run the full pipeline with the `medium` preset for ~2x grid resolution:
+
+**Vertical pipeline:**
+```bash
+cd /workspace && /workspace/.venv/bin/python -m reach_avoid_game.scripts.compute_vertical --preset medium --config /workspace/config/game_params.yaml --output-dir /workspace/data/value_functions/ 2>&1
+```
+
+The medium preset gives:
+- vertical: z_rel_points=120, v_dz_points=50
+- vertical_3d: z_d_points=120, v_dz_points=50, z_a_points=120
+
+**Horizontal pipeline (with walls in avoid set):**
+```bash
+cd /workspace && /workspace/.venv/bin/python -m reach_avoid_game.scripts.compute_horizontal --preset medium --config /workspace/config/game_params.yaml --output-dir /workspace/data/value_functions/ 2>&1
+```
+
+The medium preset gives:
+- horizontal 6D: game_x_points=15, game_y_points=10, game_vel_x/y=6
+- horizontal 4D relative: rel_pos_points=30, rel_vel_points=38
+- attacker reaching: reach_x=43, reach_y=23
+
+WARNING: The 6D computation at medium resolution (15×10×6×6×15×10 = 810,000 grid points) may take significant time. If it takes more than 30 minutes, consider falling back to the dev preset.
+
+If the medium preset runs out of memory, fall back to dev preset and note this in the commit message.
+
+**Verify:** All 7 value function files exist and are newer than the backup: `ls -la /workspace/data/value_functions/*.npz`
+**Git:** `git add /workspace/data/value_functions/*.npz && git commit -m "feat: recompute all value functions with walls/obstacles in avoid set (medium preset)"`
+
+### Phase 5: Verify defender controller works with new value functions
+
+Run the existing tests to ensure the controller still works with the new (differently-shaped) value functions:
+
+```bash
+/workspace/.venv/bin/python -m pytest /workspace/reach_avoid_ws/src/reach_avoid_controller/test/test_defender_logic.py -v --tb=short 2>&1 | tail -30
+/workspace/.venv/bin/python -m pytest /workspace/reach_avoid_game/tests/ -v --tb=short 2>&1 | tail -30
+```
+
+The ValueFunctionLoader uses RegularGridInterpolator which handles different grid shapes automatically. But if any test hardcodes expected shapes, fix them.
+
+Also verify the value function looks reasonable:
+```python
+import numpy as np
+phi_h = np.load('/workspace/data/value_functions/phi_h.npz', allow_pickle=True)
+print("phi_h shape:", phi_h['values'].shape)
+print("phi_h min:", phi_h['values'].min(), "max:", phi_h['values'].max())
+# phi_h should have negative values (defender winning region exists)
+# and should have large positive values near walls (defender loses if in wall)
+```
+
+**Verify:** All tests pass. Value functions have expected properties.
+**Git:** `git add -A && git commit -m "test: verify controller works with recomputed value functions"`
+
+## Rules
+
+- ONLY modify files in `/workspace/reach_avoid_game/src/reach_avoid_game/solvers/` and `/workspace/data/value_functions/`
+- Do NOT modify the defender controller (`defender_node.py`) — that was Wave 1
+- Do NOT modify the kinematic sim or attacker controller
+- Do NOT modify launch files
+- Do NOT modify `config.py` or `game_params.yaml` (use existing medium preset)
+- Back up existing value functions before recomputing
+- If medium preset causes OOM or takes > 30min, fall back to dev preset
+- Wall SDFs must use defender position (x_D, y_D), NOT attacker position
+- The avoid set SDF convention: negative = inside obstacle/wall (bad), positive = outside (safe)
+- When passing avoid set to HJSolver, note the sign convention: `[target_values, -obstacle_values]` — the solver expects the obstacle SDF NEGATED
+- Git: commit after each phase. Do NOT push.
+- Run computations with `/workspace/.venv/bin/python` to use the project venv
+
+## Stuck-State Handling
+
+- If `reach_avoid_game` package can't be imported: set `PYTHONPATH=/workspace/reach_avoid_game/src:$PYTHONPATH`
+- If HJSolver fails: check that dynamics classes are compatible with the Grid. The solver expects specific method signatures.
+- If medium preset OOMs: use dev preset instead. The wall avoidance fix is more important than resolution.
+- If the compute scripts fail with module errors: try running the solver functions directly in a Python script instead of via the CLI.
+- If value functions are all positive (no winning region): the wall SDF may have wrong sign convention. Check: positive should mean SAFE (outside wall).
+- If existing tests fail with new VFs: the interpolator handles different shapes automatically, but check that grid bounds haven't changed (they shouldn't if using same config).
+
+## Completion Signal
+
+The task is complete when ALL of these are true:
+1. `_make_wall_avoid_set()` exists in horizontal_solver.py
+2. `_make_obstacle_avoid_set()` includes both walls AND obstacles
+3. All 7 value function .npz files in `/workspace/data/value_functions/` are recomputed (newer than backup)
+4. Value functions computed with medium preset (or dev if medium OOMed, with note)
+5. phi_h has negative values (defender winning region exists) and large values near walls
+6. All tests in test_defender_logic.py pass with new value functions
+7. 5 git commits made
+
+When all conditions are met, output: `<promise>COMPLETE</promise>`
+If blocked after exhausting approaches, output: `<promise>BLOCKED: <reason></promise>`

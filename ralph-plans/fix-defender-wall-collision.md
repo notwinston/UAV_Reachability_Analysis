@@ -1,0 +1,176 @@
+You are iterating on a bug fix for a reach-avoid differential game project. The defender quadcopter flies straight into arena walls because its HJ bang-bang controller commands ±6 m/s with zero boundary awareness.
+
+## Cold Start — Orientation Checklist
+
+Before starting any work, run these checks to determine your current state:
+
+1. `git log --oneline -5` — see what has already been committed
+2. `grep -rn "_apply_wall_avoidance" /workspace/reach_avoid_ws/src/reach_avoid_controller/reach_avoid_controller/defender_node.py` — check if Phase 1 is done
+3. `grep -n "defender_vel\[i\].*= 0\|Zero velocity" /workspace/reach_avoid_ws/src/reach_avoid_sim/reach_avoid_sim/kinematic_sim_node.py` — check if Phase 2 is done
+4. `grep -n "wall_avoid\|_apply_wall\|safety_margin" /workspace/reach_avoid_game/scripts/numerical_sim.py` — check if Phase 3 is done
+5. `grep -n "TestWallAvoidance" /workspace/reach_avoid_ws/src/reach_avoid_controller/test/test_defender_logic.py` — check if Phase 4 is done
+6. `/workspace/.venv/bin/python -m pytest /workspace/reach_avoid_ws/src/reach_avoid_controller/test/test_defender_logic.py -v --tb=short 2>&1 | tail -20` — see current test state
+
+Based on these results, identify the first incomplete phase and begin there. Do NOT re-do completed phases.
+
+## Requirements
+
+### Phase 1: Add wall-avoidance safety layer to DefenderControlLogic
+
+**File:** `/workspace/reach_avoid_ws/src/reach_avoid_controller/reach_avoid_controller/defender_node.py`
+
+Add a method `_apply_wall_avoidance(self, cmd_vel, defender_pos, defender_vel)` to the `DefenderControlLogic` class. This is a **post-processing safety layer** applied AFTER the HJ optimal control, BEFORE returning from `compute_control()`.
+
+Implementation details:
+
+1. Arena bounds: `bounds_min = np.array([0.0, 0.0, 0.0])`, `bounds_max = np.array([45.0, 25.0, 20.0])`
+2. Per-axis gains and max speeds: `k = [self.k_x, self.k_y, self.k_z]`, `u_max = [self.U_D_h, self.U_D_h, self.U_D_z]`
+3. For each axis i (0=x, 1=y, 2=z):
+   - Compute max deceleration: `a_max = k[i] * u_max[i]` (guard: if a_max < 1e-6, set d_stop = 0)
+   - The defender dynamics are `v_dot = k*(u - v)`. For braking from speed v with command u=-u_max (opposite direction), the effective deceleration is approximately `k * (u_max + |v|)` initially. As a conservative estimate, use: `d_stop = abs(v) / k[i] * (1.0 - math.exp(-1.0))` which accounts for exponential decay over one time constant. This gives a safer stopping distance than the naive `v²/(2a)` formula.
+   - Dynamic safety margin: `margin = max(d_stop * 2.0, 1.5)` — at least 1.5m from any wall
+   - **Hysteresis**: Use activation threshold at `margin` and deactivation at `margin + 1.0`. Track activation state per-axis (or simply use the larger deactivation threshold — simpler).
+   - Distance to walls: `dist_min = pos[i] - bounds_min[i]`, `dist_max = bounds_max[i] - pos[i]`
+   - If near min wall (`dist_min < margin`) AND (velocity is negative OR position < 1.0):
+     - Scale wall-ward command: `scale = max(0.0, dist_min / margin)`; if `cmd[i] < 0`: `cmd[i] *= scale`
+     - If very close (`dist_min < 1.0`): actively push away: `cmd[i] = max(cmd[i], u_max[i] * 0.5)`
+   - Mirror logic for max wall (positive velocity direction)
+4. CRITICAL: The wall avoidance margin MUST be less than `d_h = 3.0m` to allow capture near walls. Since `d_stop` at low speeds is small and the 1.5m minimum margin < 3.0m, this is satisfied. But add an assertion: `assert margin < self.d_h or abs(defender_vel[i]) > 4.0`... actually, just ensure the minimum margin (1.5m) is less than d_h (3.0m) by design.
+5. Return the modified cmd_vel numpy array.
+
+Call `_apply_wall_avoidance()` in `compute_control()` at approximately line 130, AFTER the horizontal speed clamping block and BEFORE `return cmd_vel, status`. The insertion point is:
+```python
+        # Apply wall-avoidance safety layer
+        cmd_vel = self._apply_wall_avoidance(cmd_vel, defender_pos, defender_vel)
+
+        return cmd_vel, status
+```
+
+Do NOT add a new mode string. Use a status flag `status["wall_avoidance_active"] = True/False` if you need to track it.
+
+**State check:** `grep -n "_apply_wall_avoidance" /workspace/reach_avoid_ws/src/reach_avoid_controller/reach_avoid_controller/defender_node.py`
+**Verify:** `/workspace/.venv/bin/python -m pytest /workspace/reach_avoid_ws/src/reach_avoid_controller/test/test_defender_logic.py -v --tb=short 2>&1 | tail -20` — all 11 existing tests must still pass.
+**Git:** `git add /workspace/reach_avoid_ws/src/reach_avoid_controller/reach_avoid_controller/defender_node.py && git commit -m "fix: add wall-avoidance safety layer to defender controller"`
+
+### Phase 2: Fix kinematic sim velocity on wall contact
+
+**File:** `/workspace/reach_avoid_ws/src/reach_avoid_sim/reach_avoid_sim/kinematic_sim_node.py`
+
+In the `_sim_step()` method, AFTER the position clamping block (lines 89-95), add velocity zeroing for the defender. Only zero the wall-normal velocity component, not tangential:
+
+```python
+# Zero wall-normal velocity on wall contact (prevent wall-pushing)
+bounds_lo = [0.0, 0.0, 0.0]
+bounds_hi = [45.0, 25.0, 20.0]
+for i in range(3):
+    if self._defender_pos[i] <= bounds_lo[i] and self._defender_vel[i] < 0:
+        self._defender_vel[i] = 0.0
+    if self._defender_pos[i] >= bounds_hi[i] and self._defender_vel[i] > 0:
+        self._defender_vel[i] = 0.0
+```
+
+**State check:** `grep -n "Zero wall-normal\|defender_vel\[i\].*= 0" /workspace/reach_avoid_ws/src/reach_avoid_sim/reach_avoid_sim/kinematic_sim_node.py`
+**Verify:** Read the file and confirm the velocity zeroing code is present after position clamping.
+**Git:** `git add /workspace/reach_avoid_ws/src/reach_avoid_sim/reach_avoid_sim/kinematic_sim_node.py && git commit -m "fix: zero wall-normal velocity on contact in kinematic sim"`
+
+### Phase 3: Add wall avoidance to numerical simulation
+
+**File:** `/workspace/reach_avoid_game/scripts/numerical_sim.py`
+
+First READ the file to understand its structure. It already clamps positions to room bounds. Add two things:
+
+1. After computing defender control (`u_x, u_y, u_z`) and before integration, apply wall-avoidance using the same formula as Phase 1 (adapted for the numpy-based simulation loop).
+2. After position clipping, zero velocity in wall-normal direction (same as Phase 2).
+
+Adapt to the file's actual structure — it may use different variable names. Read first, then edit.
+
+**State check:** `grep -n "wall_avoid\|safety_margin\|d_stop" /workspace/reach_avoid_game/scripts/numerical_sim.py`
+**Verify:** `/workspace/.venv/bin/python -m pytest /workspace/reach_avoid_game/tests/ -v --tb=short 2>&1 | tail -20`
+**Git:** `git add /workspace/reach_avoid_game/scripts/numerical_sim.py && git commit -m "fix: add wall-avoidance to numerical simulation"`
+
+### Phase 4: Add wall-avoidance unit tests
+
+**File:** `/workspace/reach_avoid_ws/src/reach_avoid_controller/test/test_defender_logic.py`
+
+Add a `TestWallAvoidance` class with these specific tests (use the existing `logic` fixture):
+
+1. `test_wall_avoidance_scales_near_min_wall_x`: Defender at pos=[1.0, 12.5, 10.0], vel=[-5.0, 0.0, 0.0]. The HJ controller might command cmd_vel=[-6.0, 3.0, 0.0]. After wall avoidance, cmd[0] should be > -6.0 (scaled or reversed). Assert `cmd[0] > -3.0`.
+
+2. `test_wall_avoidance_scales_near_max_wall_x`: Defender at pos=[44.0, 12.5, 10.0], vel=[5.0, 0.0, 0.0]. After wall avoidance, x-command toward wall should be scaled. Assert `cmd[0] < 3.0`.
+
+3. `test_wall_avoidance_pushes_away_very_close`: Defender at pos=[0.3, 12.5, 10.0], vel=[-1.0, 0.0, 0.0]. After wall avoidance, x-command should be positive (push away). Assert `cmd[0] > 0`.
+
+4. `test_wall_avoidance_no_effect_at_center`: Defender at pos=[22.5, 12.5, 10.0], vel=[0.0, 0.0, 0.0], attacker at pos=[25.0, 15.0, 10.0]. Wall avoidance should not change the command. Compute control with and without wall avoidance and compare. Or just verify the command matches expected HJ output.
+
+5. `test_wall_avoidance_y_and_z_walls`: Test y-wall (pos=[22.5, 1.0, 10.0] vel=[0, -4.0, 0]) and z-wall (pos=[22.5, 12.5, 19.0] vel=[0, 0, 3.0]). Both should have scaled commands.
+
+6. `test_wall_avoidance_allows_capture_near_wall`: Defender at pos=[2.0, 12.5, 10.0], vel=[0, 0, 0], attacker at pos=[1.0, 12.5, 10.0]. The defender should still be able to command velocity toward the attacker (because d_h=3.0m > margin at zero velocity=1.5m). Verify `cmd[0] < 0` (toward attacker which is at x=1.0).
+
+To test wall avoidance directly, you can call `logic._apply_wall_avoidance(cmd_vel, defender_pos, defender_vel)` with known inputs. Or call `logic.compute_control()` with positions near walls and check the output.
+
+**Verify:** `/workspace/.venv/bin/python -m pytest /workspace/reach_avoid_ws/src/reach_avoid_controller/test/test_defender_logic.py -v --tb=short 2>&1 | tail -20` — all tests pass including the new ones.
+**Git:** `git add /workspace/reach_avoid_ws/src/reach_avoid_controller/test/test_defender_logic.py && git commit -m "test: add wall-avoidance unit tests for defender controller"`
+
+### Phase 5: Regression testing
+
+Run ALL existing tests:
+```bash
+/workspace/.venv/bin/python -m pytest /workspace/reach_avoid_ws/src/reach_avoid_controller/test/ -v --tb=short 2>&1 | tail -30
+/workspace/.venv/bin/python -m pytest /workspace/reach_avoid_game/tests/ -v --tb=short 2>&1 | tail -30
+/workspace/.venv/bin/python -m pytest /workspace/tests/ -v --tb=short 2>&1 | tail -30
+```
+
+If any tests require `rclpy` and fail with ImportError, that is acceptable — skip those. Focus on tests that test pure logic (no ROS2).
+
+If any logic test fails, fix it. Wall avoidance should not change behavior when the defender is far from walls, so the 11 existing tests should pass unchanged.
+
+**Verify:** All three pytest commands complete with 0 failures on non-rclpy tests.
+**Git:** `git add -A && git commit -m "test: verify wall-avoidance fix passes all test suites"`
+
+## Rules
+
+- ONLY modify these 4 files:
+  - `/workspace/reach_avoid_ws/src/reach_avoid_controller/reach_avoid_controller/defender_node.py`
+  - `/workspace/reach_avoid_ws/src/reach_avoid_sim/reach_avoid_sim/kinematic_sim_node.py`
+  - `/workspace/reach_avoid_game/scripts/numerical_sim.py`
+  - `/workspace/reach_avoid_ws/src/reach_avoid_controller/test/test_defender_logic.py`
+- Do NOT modify value function solvers under `/workspace/reach_avoid_game/src/reach_avoid_game/solvers/`
+- Do NOT modify the attacker controller at `/workspace/reach_avoid_ws/src/attacker_controller/`
+- Do NOT modify launch files under `/workspace/reach_avoid_ws/src/reach_avoid_bringup/launch/`
+- Do NOT modify config files (`game_params.yaml`, `config.py`)
+- Do NOT modify `_optimal_reaching_horizontal`, `_optimal_reaching_vertical`, `_optimal_tracking_horizontal`, or `_optimal_tracking_vertical` methods — wall avoidance is POST-PROCESSING only
+- Do NOT add new mode strings to the valid_modes set. Use a separate `status["wall_avoidance_active"]` flag if needed.
+- Do NOT delete or weaken existing tests to make the suite pass
+- Do NOT push to remote. Commit locally only after each phase.
+- Do NOT rewrite any file from scratch. Make targeted, surgical edits.
+- Do NOT run launch files (require full ROS2 stack). All verification is through pytest.
+- Do NOT install or remove any dependencies.
+- Arena bounds MUST be [0,45]×[0,25]×[0,20]. Hardcode in `_apply_wall_avoidance` (matches kinematic_sim and config).
+- Wall avoidance minimum margin (1.5m) MUST be less than d_h (3.0m) so capture near walls is still possible.
+- Use `numpy` for vector operations (already imported in defender_node.py).
+- Use `import math` for scalar operations (already imported).
+- Git: commit after each phase with the specified message. Use `git add <specific_file>`, not `git add -A` (except Phase 5 final cleanup).
+
+## Stuck-State Handling
+
+- If the same test fails 3+ times on the same assertion: STOP modifying wall avoidance math. Print the actual values (stopping distance, margin, scale factor) for the failing test case. Verify against manual calculation. Then try a simpler approach: linear speed reduction `cmd[i] *= max(0, dist/margin)` without the exponential stopping distance formula.
+- If `pytest` can't find test files: run from the test file's directory, or use the absolute path with `/workspace/.venv/bin/python -m pytest <absolute_path>`.
+- If tests fail due to missing `rclpy`: those tests are ROS2 integration tests, skip them. The defender logic tests do NOT require rclpy.
+- If `numerical_sim.py` has a different structure than expected: read it FULLY first, then adapt. If unsure where to add wall avoidance, add it right after the control computation and before the Euler integration step.
+- If a phase's verification fails: fix the issue in the SAME phase before moving to the next.
+- Before EVERY code change: read the FULL pytest output and quote the specific failing assertion before proposing a fix.
+
+## Completion Signal
+
+The task is complete when ALL of these are true:
+1. `_apply_wall_avoidance()` method exists in `DefenderControlLogic` class in `defender_node.py`
+2. `_apply_wall_avoidance()` is called in `compute_control()` before the return statement
+3. `kinematic_sim_node.py` zeros wall-normal velocity on wall contact
+4. `numerical_sim.py` has wall-avoidance logic
+5. `TestWallAvoidance` class exists in `test_defender_logic.py` with at least 5 test methods
+6. ALL tests in `test_defender_logic.py` pass (both existing 11 and new wall avoidance tests)
+7. No regressions in `reach_avoid_game/tests/`
+8. 5 git commits made (one per phase)
+
+When all conditions are met, output: `<promise>COMPLETE</promise>`
+If blocked after exhausting approaches, output: `<promise>BLOCKED: <reason></promise>`
