@@ -106,19 +106,25 @@ class TestSDFPlugins:
         plugins = world.findall("plugin")
         assert len(plugins) >= 8
 
-    def test_plugins_before_lights(self, world):
-        """Plugins should appear before <light> elements in the SDF."""
-        children = list(world)
-        first_plugin_idx = None
-        first_light_idx = None
-        for i, child in enumerate(children):
-            if child.tag == "plugin" and first_plugin_idx is None:
-                first_plugin_idx = i
-            if child.tag == "light" and first_light_idx is None:
-                first_light_idx = i
-        assert first_plugin_idx is not None, "No plugins found"
-        assert first_light_idx is not None, "No lights found"
-        assert first_plugin_idx < first_light_idx, "Plugins should come before lights"
+    def test_no_directional_lights(self, world):
+        """All directional lights should be removed for GUI performance."""
+        lights = world.findall("light")
+        assert len(lights) == 0, "Directional lights should be removed for performance"
+
+    def test_scene_shadows_disabled(self, world):
+        """Scene element should explicitly disable shadows."""
+        scene = world.find("scene")
+        assert scene is not None, "Missing <scene> element"
+        shadows = scene.find("shadows")
+        assert shadows is not None, "Missing <shadows> in <scene>"
+        assert shadows.text.strip() == "false", "Shadows should be disabled"
+
+    def test_scene_has_ambient(self, world):
+        """Scene should have bright ambient light to compensate for removed sun."""
+        scene = world.find("scene")
+        assert scene is not None, "Missing <scene> element"
+        ambient = scene.find("ambient")
+        assert ambient is not None, "Missing <ambient> in <scene>"
 
 
 # ===========================================================================
