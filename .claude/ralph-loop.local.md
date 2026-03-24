@@ -1,6 +1,6 @@
 ---
 active: true
-iteration: 14
+iteration: 15
 session_id: 
 max_iterations: 0
 completion_promise: "_make_wall_avoid_set() exists in horizontal_solver.py AND _make_obstacle_avoid_set() includes both walls AND obstacles AND all 7 value function .npz files recomputed with medium preset (or dev with note) AND phi_h has negative values (winning region exists) AND all tests in test_defender_logic.py pass AND 5 git commits made"
