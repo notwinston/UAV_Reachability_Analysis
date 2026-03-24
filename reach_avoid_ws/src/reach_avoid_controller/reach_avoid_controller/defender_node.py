@@ -128,7 +128,67 @@ class DefenderControlLogic:
         ))
 
         cmd_vel = np.array([u_x, u_y, u_z])
+
+        # Apply wall-avoidance safety layer
+        cmd_vel = self._apply_wall_avoidance(cmd_vel, defender_pos, defender_vel)
+
         return cmd_vel, status
+
+    def _apply_wall_avoidance(
+        self,
+        cmd_vel: np.ndarray,
+        defender_pos: np.ndarray,
+        defender_vel: np.ndarray,
+    ) -> np.ndarray:
+        """Post-processing safety layer to prevent wall collisions.
+
+        Scales down velocity commands toward nearby walls using a dynamic
+        safety margin based on stopping distance for double-integrator
+        dynamics. Actively pushes away when very close (< 1m) to a wall.
+        """
+        bounds_min = np.array([0.0, 0.0, 0.0])
+        bounds_max = np.array([45.0, 25.0, 20.0])
+        k = [self.k_x, self.k_y, self.k_z]
+        u_max = [self.U_D_h, self.U_D_h, self.U_D_z]
+
+        result = cmd_vel.copy()
+
+        for i in range(3):
+            v = defender_vel[i]
+            pos = defender_pos[i]
+
+            # Stopping distance for v_dot = k*(u - v) dynamics.
+            # Conservative estimate using exponential decay over one time constant.
+            if k[i] > 1e-6:
+                d_stop = abs(v) / k[i] * (1.0 - math.exp(-1.0))
+            else:
+                d_stop = 0.0
+
+            # Dynamic safety margin: at least 1.5m from any wall
+            margin = max(d_stop * 2.0, 1.5)
+
+            dist_min = pos - bounds_min[i]
+            dist_max = bounds_max[i] - pos
+
+            # Near min wall and moving toward it (or very close)
+            if dist_min < margin and (v < 0 or pos < 1.0):
+                scale = max(0.0, dist_min / margin)
+                if result[i] < 0:
+                    result[i] *= scale
+                # Very close: actively push away
+                if dist_min < 1.0:
+                    result[i] = max(result[i], u_max[i] * 0.5)
+
+            # Near max wall and moving toward it (or very close)
+            if dist_max < margin and (v > 0 or pos > bounds_max[i] - 1.0):
+                scale = max(0.0, dist_max / margin)
+                if result[i] > 0:
+                    result[i] *= scale
+                # Very close: actively push away
+                if dist_max < 1.0:
+                    result[i] = min(result[i], -u_max[i] * 0.5)
+
+        return result
 
     def _vertical_reach_track(
         self,
