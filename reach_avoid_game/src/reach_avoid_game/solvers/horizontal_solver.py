@@ -45,22 +45,23 @@ def _make_horizontal_capture_set(grid: Grid, d_h: float) -> np.ndarray:
     return dist - d_h
 
 
-def _make_wall_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray:
+def _make_wall_avoid_set(grid: Grid, config: GameConfig, margin: float = 0.5) -> np.ndarray:
     """Create arena wall avoid set SDF for defender position in 6D grid.
 
-    SDF convention: negative inside wall (avoid), positive outside (safe).
-    The SDF is the signed distance to the nearest arena boundary.
+    SDF convention: negative inside avoid zone (wall + margin), positive outside (safe).
+    A margin of 1.5m means the defender should stay at least 1.5m from walls.
+    This is less than d_h (3.0m) so capture near walls is still possible.
     """
     shape = tuple(grid.pts_each_dim)
     ones = np.ones(shape)
     x_d = grid.vs[0] * ones
     y_d = grid.vs[1] * ones
 
-    # SDF for each wall (positive = safe distance from wall, negative = inside wall)
-    wall_x_min = x_d - config.room.x_min
-    wall_x_max = config.room.x_max - x_d
-    wall_y_min = y_d - config.room.y_min
-    wall_y_max = config.room.y_max - y_d
+    # SDF for each wall with margin (negative within margin distance of wall)
+    wall_x_min = x_d - config.room.x_min - margin
+    wall_x_max = config.room.x_max - x_d - margin
+    wall_y_min = y_d - config.room.y_min - margin
+    wall_y_max = config.room.y_max - y_d - margin
 
     # Combined: min of all distances (closest wall)
     wall_sdf = np.minimum(np.minimum(wall_x_min, wall_x_max),
