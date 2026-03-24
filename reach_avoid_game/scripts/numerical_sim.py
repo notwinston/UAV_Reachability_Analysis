@@ -9,6 +9,7 @@ The attacker uses optimal escape control.
 """
 
 import argparse
+import math
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,43 @@ from reach_avoid_game.solvers.control_extraction import (
     extract_optimal_disturbance_vertical,
     is_deep_inside_invariant_set,
 )
+
+
+def _apply_wall_avoidance(cmd, pos, vel, config):
+    """Apply wall-avoidance safety layer to defender control commands.
+
+    Scales down commands toward nearby walls using dynamic stopping-distance
+    margins. Actively pushes away when very close (< 1m) to a wall.
+    """
+    bounds_min = [config.room.x_min, config.room.y_min, config.room.z_min]
+    bounds_max = [config.room.x_max, config.room.y_max, config.room.z_max]
+    k_gains = [config.defender.k_x, config.defender.k_y, config.defender.k_z]
+    u_max = [config.defender.max_speed_horizontal, config.defender.max_speed_horizontal,
+             config.defender.max_speed_vertical]
+    result = list(cmd)
+    for i in range(3):
+        v = vel[i]
+        p = pos[i]
+        if k_gains[i] > 1e-6:
+            d_stop = abs(v) / k_gains[i] * (1.0 - math.exp(-1.0))
+        else:
+            d_stop = 0.0
+        margin = max(d_stop * 2.0, 1.5)
+        dist_min = p - bounds_min[i]
+        dist_max = bounds_max[i] - p
+        if dist_min < margin and (v < 0 or p < 1.0):
+            scale = max(0.0, dist_min / margin)
+            if result[i] < 0:
+                result[i] *= scale
+            if dist_min < 1.0:
+                result[i] = max(result[i], u_max[i] * 0.5)
+        if dist_max < margin and (v > 0 or p > bounds_max[i] - 1.0):
+            scale = max(0.0, dist_max / margin)
+            if result[i] > 0:
+                result[i] *= scale
+            if dist_max < 1.0:
+                result[i] = min(result[i], -u_max[i] * 0.5)
+    return result
 
 
 def run_vertical_sim(
@@ -314,6 +352,12 @@ def run_combined_sim(
         )
         d_x, d_y = _extract_horizontal_disturbance(phi_h_data, state_h, u_a_h)
 
+        # Apply wall-avoidance safety layer to defender controls
+        wa = _apply_wall_avoidance(
+            [u_x, u_y, u_z], [x_d, y_d, z_d], [v_dx, v_dy, v_dz], config,
+        )
+        u_x, u_y, u_z = wa[0], wa[1], wa[2]
+
         # Store
         traj["u_x"][step], traj["u_y"][step], traj["u_z"][step] = u_x, u_y, u_z
         traj["d_x"][step], traj["d_y"][step], traj["d_z_ctrl"][step] = d_x, d_y, d_z_ctrl
@@ -339,6 +383,22 @@ def run_combined_sim(
         x_a = np.clip(x_a, config.room.x_min, config.room.x_max)
         y_a = np.clip(y_a, config.room.y_min, config.room.y_max)
         z_a = np.clip(z_a, config.room.z_min, config.room.z_max)
+
+        # Zero wall-normal velocity on wall contact
+        for pos_val, vel_ref, lo, hi in [
+            (x_d, 'v_dx', config.room.x_min, config.room.x_max),
+            (y_d, 'v_dy', config.room.y_min, config.room.y_max),
+            (z_d, 'v_dz', config.room.z_min, config.room.z_max),
+        ]:
+            if vel_ref == 'v_dx':
+                if pos_val <= lo and v_dx < 0: v_dx = 0.0
+                if pos_val >= hi and v_dx > 0: v_dx = 0.0
+            elif vel_ref == 'v_dy':
+                if pos_val <= lo and v_dy < 0: v_dy = 0.0
+                if pos_val >= hi and v_dy > 0: v_dy = 0.0
+            elif vel_ref == 'v_dz':
+                if pos_val <= lo and v_dz < 0: v_dz = 0.0
+                if pos_val >= hi and v_dz > 0: v_dz = 0.0
 
         traj["x_d"][step + 1], traj["y_d"][step + 1], traj["z_d"][step + 1] = x_d, y_d, z_d
         traj["v_dx"][step + 1], traj["v_dy"][step + 1], traj["v_dz"][step + 1] = v_dx, v_dy, v_dz
