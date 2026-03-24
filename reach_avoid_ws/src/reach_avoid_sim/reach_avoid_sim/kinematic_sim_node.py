@@ -94,6 +94,15 @@ def main(args=None):
                 self._attacker_pos[1] = max(0.0, min(25.0, self._attacker_pos[1]))
                 self._attacker_pos[2] = max(0.0, min(20.0, self._attacker_pos[2]))
 
+                # Zero wall-normal velocity on wall contact (prevent wall-pushing)
+                bounds_lo = [0.0, 0.0, 0.0]
+                bounds_hi = [45.0, 25.0, 20.0]
+                for i in range(3):
+                    if self._defender_pos[i] <= bounds_lo[i] and self._defender_vel[i] < 0:
+                        self._defender_vel[i] = 0.0
+                    if self._defender_pos[i] >= bounds_hi[i] and self._defender_vel[i] > 0:
+                        self._defender_vel[i] = 0.0
+
                 # Publish defender state
                 dp = PoseStamped()
                 dp.header.stamp = now.to_msg()
