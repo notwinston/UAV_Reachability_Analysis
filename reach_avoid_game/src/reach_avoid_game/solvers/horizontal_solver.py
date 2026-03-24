@@ -445,12 +445,10 @@ def solve_horizontal_max_distance_6d(
     y_a = grid.vs[5] * ones
     initial_values = np.sqrt((x_d - x_a)**2 + (y_d - y_a)**2)
 
-    # Obstacle penalty
-    if config.obstacles:
-        obstacle_sdf = _make_obstacle_avoid_set(grid, config)
-        if obstacle_sdf is not None:
-            penalty = np.where(obstacle_sdf < 0, 1000.0, 0.0)
-            initial_values = initial_values + penalty
+    # Wall + obstacle penalty: large cost when defender is inside walls or obstacles
+    wall_obstacle_sdf = _make_obstacle_avoid_set(grid, config)
+    wall_penalty = np.where(wall_obstacle_sdf < 0, 1000.0, 0.0)
+    initial_values = initial_values + wall_penalty
 
     T = 2.5
     n_steps = 50
