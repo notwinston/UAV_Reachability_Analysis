@@ -48,7 +48,7 @@ def _make_horizontal_capture_set(grid: Grid, d_h: float) -> np.ndarray:
 def _make_obstacle_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray | None:
     """Create obstacle avoid set for the 6D horizontal game.
 
-    Uses defender position (x_D, y_D).
+    Obstacles constrain both defender (x_D, y_D) and attacker (x_A, y_A).
     SDF: negative inside obstacle, positive outside.
     """
     if not config.obstacles:
@@ -58,13 +58,20 @@ def _make_obstacle_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray | Non
     ones = np.ones(shape)
     x_d = grid.vs[0] * ones
     y_d = grid.vs[1] * ones
+    x_a = grid.vs[4] * ones
+    y_a = grid.vs[5] * ones
 
     combined = None
     for obs in config.obstacles:
-        sdf = np.maximum(
+        sdf_d = np.maximum(
             np.maximum(obs.x_min - x_d, x_d - obs.x_max),
             np.maximum(obs.y_min - y_d, y_d - obs.y_max),
         )
+        sdf_a = np.maximum(
+            np.maximum(obs.x_min - x_a, x_a - obs.x_max),
+            np.maximum(obs.y_min - y_a, y_a - obs.y_max),
+        )
+        sdf = np.minimum(sdf_d, sdf_a)
         if combined is None:
             combined = sdf
         else:

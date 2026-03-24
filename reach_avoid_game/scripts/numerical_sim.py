@@ -188,18 +188,60 @@ def _extract_horizontal_control(
             return u_x, u_y, 1
 
 
-def _extract_horizontal_disturbance(phi_h_data, state_h, u_a_h):
-    """Extract attacker optimal horizontal disturbance.
+def _attacker_waypoint(x_a, y_a, target_center, obstacles, margin=2.0):
+    """Return the immediate waypoint for the attacker, routing around obstacles.
 
-    Attacker minimizes value function.
+    Phase 1 — head for the near corner of the wall gap (clears y-range).
+    Phase 2 — once y is outside the wall, proceed past it in x.
     """
+    tx, ty = target_center
+    for obs in obstacles:
+        if tx <= obs.x_max or x_a > obs.x_max + margin:
+            continue
+
+        dist_top = abs(y_a - obs.y_max)
+        dist_bot = abs(y_a - obs.y_min)
+        if dist_top < dist_bot:
+            gap_y = obs.y_max + margin
+            y_cleared = y_a > obs.y_max
+        else:
+            gap_y = obs.y_min - margin
+            y_cleared = y_a < obs.y_min
+
+        if y_cleared:
+            return (obs.x_max + margin, gap_y)
+        return (obs.x_min, gap_y)
+    return target_center
+
+
+def _extract_horizontal_disturbance(phi_h_data, state_h, u_a_h,
+                                    target_center=None, obstacles=()):
+    """Extract attacker horizontal control as goal-seeking toward target.
+
+    The attacker's objective is to reach the target region, not merely
+    to evade the defender (which is what minimising phi_h would do).
+    When a target_center is provided the attacker moves at max speed
+    toward it, routing around obstacles; otherwise falls back to the
+    phi_h gradient.
+    """
+    x_a, y_a = state_h[4], state_h[5]
+
+    if target_center is not None:
+        wp = _attacker_waypoint(x_a, y_a, target_center, obstacles)
+        dx = wp[0] - x_a
+        dy = wp[1] - y_a
+        dist = np.sqrt(dx * dx + dy * dy)
+        if dist > 1e-6:
+            d_x = (dx / dist) * u_a_h
+            d_y = (dy / dist) * u_a_h
+        else:
+            d_x, d_y = 0.0, 0.0
+        return d_x, d_y
+
     state_h_clamped = np.clip(state_h, phi_h_data.grid_min, phi_h_data.grid_max)
     grad = compute_gradient(phi_h_data, state_h_clamped)
-    # Attacker minimizes: d direction = -sign of gradient wrt attacker position
-    direction_x = grad[4]  # dV/dx_A
-    direction_y = grad[5]  # dV/dy_A
-    d_x = -u_a_h if direction_x >= 0 else u_a_h
-    d_y = -u_a_h if direction_y >= 0 else u_a_h
+    d_x = -u_a_h if grad[4] >= 0 else u_a_h
+    d_y = -u_a_h if grad[5] >= 0 else u_a_h
     return d_x, d_y
 
 
@@ -249,8 +291,8 @@ def run_combined_sim(
     # Defender: [x_D, y_D, z_D, v_Dx, v_Dy, v_Dz]
     x_d, y_d, z_d = 10.0, 12.0, 5.0
     v_dx, v_dy, v_dz = 0.0, 0.0, 0.0
-    # Attacker: [x_A, y_A, z_A]
-    x_a, y_a, z_a = 25.0, 12.0, 2.0
+    # Attacker: [x_A, y_A, z_A] — starts behind the obstacle wall
+    x_a, y_a, z_a = 5.0, 12.0, 2.0
 
     n_steps = int(T / dt)
     if check_only:
@@ -270,6 +312,11 @@ def run_combined_sim(
     traj["x_d"][0], traj["y_d"][0], traj["z_d"][0] = x_d, y_d, z_d
     traj["v_dx"][0], traj["v_dy"][0], traj["v_dz"][0] = v_dx, v_dy, v_dz
     traj["x_a"][0], traj["y_a"][0], traj["z_a"][0] = x_a, y_a, z_a
+
+    target_center = None
+    if hasattr(config, 'target_region') and config.target_region is not None:
+        tr = config.target_region
+        target_center = ((tr.x_min + tr.x_max) / 2, (tr.y_min + tr.y_max) / 2)
 
     captured_h = False
     captured_z = False
@@ -312,7 +359,8 @@ def run_combined_sim(
             state_h, state_h_rel,
             k_x, k_y, u_d_h,
         )
-        d_x, d_y = _extract_horizontal_disturbance(phi_h_data, state_h, u_a_h)
+        d_x, d_y = _extract_horizontal_disturbance(
+            phi_h_data, state_h, u_a_h, target_center, config.obstacles)
 
         # Store
         traj["u_x"][step], traj["u_y"][step], traj["u_z"][step] = u_x, u_y, u_z
@@ -339,6 +387,14 @@ def run_combined_sim(
         x_a = np.clip(x_a, config.room.x_min, config.room.x_max)
         y_a = np.clip(y_a, config.room.y_min, config.room.y_max)
         z_a = np.clip(z_a, config.room.z_min, config.room.z_max)
+
+        # Enforce obstacle collisions: revert position if inside any obstacle
+        for obs in config.obstacles:
+            if obs.x_min <= x_d <= obs.x_max and obs.y_min <= y_d <= obs.y_max:
+                x_d, y_d = traj["x_d"][step], traj["y_d"][step]
+                v_dx, v_dy = 0.0, 0.0
+            if obs.x_min <= x_a <= obs.x_max and obs.y_min <= y_a <= obs.y_max:
+                x_a, y_a = traj["x_a"][step], traj["y_a"][step]
 
         traj["x_d"][step + 1], traj["y_d"][step + 1], traj["z_d"][step + 1] = x_d, y_d, z_d
         traj["v_dx"][step + 1], traj["v_dy"][step + 1], traj["v_dz"][step + 1] = v_dx, v_dy, v_dz

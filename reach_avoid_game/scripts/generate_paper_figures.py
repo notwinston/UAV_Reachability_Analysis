@@ -320,7 +320,7 @@ def fig11_simulation_trajectories(vf_dir, output_dir, config):
     """Fig 11 — Simulation trajectories: x-y and z-t side by side."""
     run_combined_sim = _load_numerical_sim()
 
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=10.0)
+    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=20.0)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
@@ -389,7 +389,7 @@ def fig12_combined_3d(vf_dir, output_dir, config):
     """Fig 12 — Combined 3D game view: 3D plot of both drone paths."""
     run_combined_sim = _load_numerical_sim()
 
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=10.0)
+    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=20.0)
 
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection="3d")

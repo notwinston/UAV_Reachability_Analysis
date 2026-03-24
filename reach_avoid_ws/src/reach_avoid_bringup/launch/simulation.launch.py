@@ -26,6 +26,14 @@ def get_px4_path():
     return os.path.join(os.path.expanduser("~"), "PX4-Autopilot")
 
 
+def _find_path(candidates, fallback):
+    """Return the first existing path from candidates, or fallback."""
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return fallback
+
+
 def generate_launch_description():
     sim_pkg = get_package_share_directory('reach_avoid_sim')
     bringup_pkg = get_package_share_directory('reach_avoid_bringup')
@@ -66,10 +74,11 @@ def generate_launch_description():
         px4_plugins,
     ]))
     gazebo_env['GZ_SIM_SERVER_CONFIG_PATH'] = px4_server_config
-    # Run Gazebo headless (-s server-only) when no DISPLAY is available
+    # Run Gazebo headless (-s server-only, no GUI) when no DISPLAY is available
     gz_cmd = ['gz', 'sim', '-r']
     if not os.environ.get('DISPLAY'):
         gz_cmd.append('-s')  # headless server mode
+        gz_cmd.append('--headless-rendering')  # skip GPU windowed rendering path
     gz_cmd.append(LaunchConfiguration('world_file'))
 
     gazebo = ExecuteProcess(
@@ -242,7 +251,10 @@ def generate_launch_description():
             'target_y': 12.5,
             'target_z': 10.0,
             'waypoints': attacker_waypoints,
-            'value_function_dir': '/workspace/data/value_functions/',
+            'value_function_dir': _find_path([
+                os.path.join(os.path.expanduser('~'), 'ws', 'data', 'value_functions'),
+                '/workspace/data/value_functions',
+            ], '/workspace/data/value_functions'),
             'target_altitude': 10.0,
         }],
         output='screen',
