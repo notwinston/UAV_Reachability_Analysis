@@ -130,3 +130,67 @@ class TestSafeFallback:
         assert np.all(np.isfinite(cmd))
         assert status["z_mode"] == "pid_fallback"
         assert status["h_mode"] == "pid_fallback"
+
+
+class TestWallAvoidance:
+    """Tests for the wall-avoidance safety layer."""
+
+    def test_wall_avoidance_scales_near_min_wall_x(self, logic):
+        """Near x=0 wall with velocity toward it: command should be scaled."""
+        cmd = np.array([-6.0, 3.0, 0.0])
+        pos = np.array([1.0, 12.5, 10.0])
+        vel = np.array([-5.0, 0.0, 0.0])
+        result = logic._apply_wall_avoidance(cmd, pos, vel)
+        # x-command toward wall should be reduced
+        assert result[0] > -3.0
+
+    def test_wall_avoidance_scales_near_max_wall_x(self, logic):
+        """Near x=45 wall with velocity toward it: command should be scaled."""
+        cmd = np.array([6.0, 0.0, 0.0])
+        pos = np.array([44.0, 12.5, 10.0])
+        vel = np.array([5.0, 0.0, 0.0])
+        result = logic._apply_wall_avoidance(cmd, pos, vel)
+        assert result[0] < 3.0
+
+    def test_wall_avoidance_pushes_away_very_close(self, logic):
+        """Very close to wall (< 1m): should actively push away."""
+        cmd = np.array([-6.0, 0.0, 0.0])
+        pos = np.array([0.3, 12.5, 10.0])
+        vel = np.array([-1.0, 0.0, 0.0])
+        result = logic._apply_wall_avoidance(cmd, pos, vel)
+        assert result[0] > 0  # pushed away from wall
+
+    def test_wall_avoidance_no_effect_at_center(self, logic):
+        """At arena center with zero velocity: command should be unchanged."""
+        cmd = np.array([3.0, -2.0, 1.0])
+        pos = np.array([22.5, 12.5, 10.0])
+        vel = np.array([0.0, 0.0, 0.0])
+        result = logic._apply_wall_avoidance(cmd, pos, vel)
+        np.testing.assert_array_almost_equal(result, cmd)
+
+    def test_wall_avoidance_y_and_z_walls(self, logic):
+        """Wall avoidance works on y and z axes too."""
+        # Near y=0 wall
+        cmd_y = np.array([0.0, -6.0, 0.0])
+        pos_y = np.array([22.5, 0.5, 10.0])
+        vel_y = np.array([0.0, -4.0, 0.0])
+        result_y = logic._apply_wall_avoidance(cmd_y, pos_y, vel_y)
+        assert result_y[1] > 0  # pushed away
+
+        # Near z=20 wall
+        cmd_z = np.array([0.0, 0.0, 4.0])
+        pos_z = np.array([22.5, 12.5, 19.5])
+        vel_z = np.array([0.0, 0.0, 3.0])
+        result_z = logic._apply_wall_avoidance(cmd_z, pos_z, vel_z)
+        assert result_z[2] < 4.0  # scaled down
+
+    def test_wall_avoidance_allows_capture_near_wall(self, logic):
+        """Defender can still move toward attacker near wall (margin < d_h)."""
+        # Attacker at x=1.0, defender at x=2.0. Margin at zero vel = 1.5m.
+        # Defender is 2.0m from wall, margin is 1.5m, so not in avoidance zone.
+        d_pos = np.array([2.0, 12.5, 10.0])
+        d_vel = np.array([0.0, 0.0, 0.0])
+        a_pos = np.array([1.0, 12.5, 10.0])
+        cmd, _ = logic.compute_control(d_pos, d_vel, a_pos)
+        # Should command toward attacker (negative x)
+        assert cmd[0] < 0
