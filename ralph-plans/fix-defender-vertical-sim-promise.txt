@@ -1,1 +1,0 @@
-The file kinematic_sim_node.py has been modified to use double integrator dynamics for the defender (v_dot = k * (u - v)) while keeping single integrator for the attacker. All three test suites pass: test_defender_logic.py, test_vertical_solver.py, and test_kinematic_game.py. Changes have been committed.
