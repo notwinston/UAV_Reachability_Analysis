@@ -1,0 +1,583 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{longtable}
+\usepackage{fancyhdr}
+\usepackage{float}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.95}
+\definecolor{critred}{rgb}{0.8,0.1,0.1}
+\definecolor{modoran}{rgb}{0.85,0.5,0.0}
+\definecolor{minblue}{rgb}{0.1,0.4,0.8}
+
+\lstdefinestyle{pystyle}{
+    backgroundcolor=\color{backcolour},
+    basicstyle=\ttfamily\scriptsize,
+    keywordstyle=\color{codepurple},
+    stringstyle=\color{codegreen},
+    commentstyle=\color{codegray},
+    breaklines=true,
+    frame=single,
+}
+\lstset{style=pystyle}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Paper vs.\ Code Comparison}
+\lhead{Reach-Avoid Game}
+\cfoot{\thepage}
+
+\title{\textbf{Paper--Code Comparison Report}\\[6pt]
+\large Reach-Avoid Differential Game with Reachability Analysis for UAVs\\
+Bui et al.\ (arXiv:2512.22793) vs.\ Codebase Implementation}
+\author{Auto-generated Analysis}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%======================================================================
+\section{Introduction}
+%======================================================================
+
+This document provides a systematic comparison between the algorithms described in:
+
+\begin{quote}
+\textbf{Bui, M., Monckton, S., and Chen, M.} ``Reach-Avoid Differential Game with Reachability Analysis for UAVs: A Decomposition Approach,'' \textit{arXiv:2512.22793v1}, December 2025.
+\end{quote}
+
+\noindent and their implementation in the project codebase. For each algorithm, we present:
+\begin{enumerate}[nosep]
+\item The paper's mathematical formulation with equation references
+\item The corresponding code implementation with file/line references
+\item Identified discrepancies and their severity
+\item Recommended fixes
+\end{enumerate}
+
+\noindent Severity levels:
+\begin{itemize}[nosep]
+\item \textcolor{critred}{\textbf{CRITICAL}} -- Likely cause of incorrect game outcomes
+\item \textcolor{modoran}{\textbf{MODERATE}} -- May degrade accuracy or break guarantees
+\item \textcolor{minblue}{\textbf{MINOR}} -- Numerical or practical differences
+\end{itemize}
+
+%======================================================================
+\section{Defender Reachability Algorithms}
+%======================================================================
+
+%----------------------------------------------------------------------
+\subsection{Vertical Invariant Capture Set ($\mathcal{B}_z$)}
+%----------------------------------------------------------------------
+
+\subsubsection{Paper (Section IV.A)}
+
+The paper defines relative vertical dynamics (Eq.~29):
+\begin{equation}
+\dot{\mathbf{x}}^{\mathrm{rel}}_z = \begin{bmatrix} \dot{z}^{\mathrm{rel}} \\ \dot{v}^z_D \end{bmatrix} = \begin{bmatrix} v^z_D - v^{z,C}_A \\ k_z(v^{z,C}_D - v^z_D) \end{bmatrix}
+\label{eq:vert_rel}
+\end{equation}
+
+The maximum distance value function (Eq.~30):
+\begin{equation}
+V_z(\mathbf{x}^{\mathrm{rel}}_z, t) = \sup_{\mathbf{u}^z_A(\cdot)} \inf_{\mathbf{u}^z_D(\cdot)} \max_{\tau \in [0,t]} |z^{\mathrm{rel}}(\tau)|
+\label{eq:Vz}
+\end{equation}
+
+The invariant set: $\mathcal{B}_z = \{\mathbf{x}^{\mathrm{rel}}_z \mid V_{z,\infty}(\mathbf{x}^{\mathrm{rel}}_z) \leq d_z\}$.
+
+\subsubsection{Code Implementation}
+
+\texttt{vertical\_relative.py}: Implements Eq.~\eqref{eq:vert_rel} correctly.
+\begin{lstlisting}[language=Python]
+# State: [z_rel, v_D_z]
+open_loop: [state[1], -k_z * state[1]]  # [v_Dz, -k_z*v_Dz]
+control_jacobian: [[0.0], [k_z]]        # u_D enters v_Dz_dot
+disturbance_jacobian: [[-1.0], [0.0]]   # d_A enters z_rel_dot
+\end{lstlisting}
+
+\texttt{vertical\_solver.py:152--209}: Solves $V_{z,\infty}$ with:
+\begin{itemize}[nosep]
+\item Initial condition: $|z^{\mathrm{rel}}|$ (correct per paper)
+\item Solver mode: \texttt{maxVWithV0} (implements $\max_\tau$ in Eq.~\eqref{eq:Vz})
+\item Time horizon: $T=20$s with 200 steps (sufficient for convergence)
+\item Grid: 2D $[z^{\mathrm{rel}}, v^z_D]$ per paper
+\end{itemize}
+
+\texttt{vertical\_solver.py:211--251}: Extracts $\mathcal{B}_z$:
+\begin{lstlisting}[language=Python]
+v_min = float(vf.values.min())
+d_z_effective = max(d_z, v_min * 1.05)  # <-- WORKAROUND
+b_z_mask = (vf.values <= d_z_effective).astype(np.float64)
+\end{lstlisting}
+
+\subsubsection{Discrepancies}
+
+\begin{itemize}
+\item \textcolor{modoran}{\textbf{MODERATE}}: \textbf{Effective threshold fallback.} When grid resolution is coarse, $\min(V_{z,\infty}) > d_z$, so the code relaxes the threshold to $d_z^{\mathrm{eff}} = 1.05 \cdot \min(V_{z,\infty})$. This means $\mathcal{B}_z$ may be \emph{larger} than mathematically warranted, weakening the invariance guarantee. \textbf{Fix:} Increase grid resolution so $\min(V_{z,\infty}) \leq d_z$, or warn when fallback is triggered.
+\end{itemize}
+
+\noindent\textbf{Overall}: Dynamics and solver formulation are \textbf{correct}. The fallback threshold is the only concern.
+
+%----------------------------------------------------------------------
+\subsection{Horizontal Invariant Capture Set ($\mathcal{B}_h$)}
+%----------------------------------------------------------------------
+
+\subsubsection{Paper (Section IV.B)}
+
+The paper defines (Eq.~34):
+\begin{equation}
+V_h(\mathbf{x}_h, t) = \sup_{\mathbf{u}^h_A(\cdot)} \inf_{\mathbf{u}^h_D(\cdot)} \max_{\tau\in[0,t]} l_h\!\left(\zeta^{\mathbf{u}^h_D(\cdot),\mathbf{u}^h_A(\cdot)}_{\mathbf{x}_h,0}(\tau)\right)
+\label{eq:Vh}
+\end{equation}
+where $l_h(\mathbf{x}) = \max\{l^{\mathrm{rel}}_h(\mathbf{x}), o_h(\mathbf{x})\}$ and $o_h(\mathbf{x}) = K$ if $(x_D, y_D) \in \Omega_{\mathrm{obs}}$, else $0$.
+
+\textbf{Key point}: $V_h$ is defined over the \textbf{full 6D horizontal state} $\mathbf{x}_h = (x_D, y_D, v^x_D, v^y_D, x_A, y_A)$ because the obstacle penalty $o_h$ depends on \emph{absolute} defender position, not relative coordinates.
+
+\subsubsection{Code Implementation}
+
+\texttt{horizontal\_solver.py:279--339}: Default \texttt{solve\_horizontal\_max\_distance} uses \textbf{4D relative dynamics}:
+\begin{lstlisting}[language=Python]
+# State: [x_rel, y_rel, v_D_x, v_D_y] (4D, NO absolute positions)
+grid = create_horizontal_relative_grid(config)
+dynamics = HorizontalRelativeDynamics(config)
+initial_values = sqrt(x_rel^2 + y_rel^2)  # No obstacle penalty!
+\end{lstlisting}
+
+An alternative \texttt{solve\_horizontal\_max\_distance\_6d} (lines 473--535) does exist but is not the default pipeline.
+
+\subsubsection{Discrepancies}
+
+\begin{itemize}
+\item \textcolor{critred}{\textbf{CRITICAL}}: \textbf{$V_{h,T}$ computed in 4D without obstacles.} The default solver uses 4D relative dynamics, which \emph{cannot} encode the obstacle penalty $o_h(\mathbf{x})$ from Eq.~\eqref{eq:Vh}. The paper's $V_h$ penalizes the defender for entering obstacles during tracking; the code's $V_{h,T}$ does not. Consequence: $\mathcal{B}_h$ may include states where the defender collides with obstacles while tracking.
+
+\textbf{Fix:} Use the existing \texttt{solve\_horizontal\_max\_distance\_6d} as the default, or integrate obstacle penalties into the 4D formulation via a conservative approximation (e.g., penalty when relative position implies defender is near obstacles given attacker position).
+
+\item \textcolor{modoran}{\textbf{MODERATE}}: \textbf{$V_{h,T}$ does not converge ($T=2.5$s).} Both paper and code acknowledge this. $\mathcal{B}_h$ provides only a 2.5-second tracking guarantee, \emph{not} indefinite invariance. This is a fundamental limitation of the parameters, not a code bug.
+
+\item \textcolor{modoran}{\textbf{MODERATE}}: Same $d_h^{\mathrm{eff}}$ fallback as vertical (relaxes threshold when coarse grid).
+\end{itemize}
+
+%----------------------------------------------------------------------
+\subsection{Vertical Reach-Avoid Game ($\Phi_z$)}
+%----------------------------------------------------------------------
+
+\subsubsection{Paper (Section V.A)}
+
+The paper modifies the reach set (Eq.~38):
+\begin{equation}
+\mathcal{R}_z = \{\mathbf{x}^z \mid \mathbf{x}^{\mathrm{rel}}_z \in \mathcal{B}_z\}
+\end{equation}
+and solves Eq.~25 with $l_z(\mathbf{x}^z) = V_{z,\infty}(z^{\mathrm{rel}}) - d_z$ as the level-set representation of $\mathcal{B}_z$.
+
+In this game, the \textbf{defender minimizes} $\Phi_z$ (Eq.~26a) while the \textbf{attacker maximizes} (Eq.~26b).
+
+\subsubsection{Code Implementation}
+
+\texttt{vertical\_solver.py:79--150}: When $V_{z,\infty}$ is available, uses $\mathcal{B}_z$ as target (correct per Eq.~38).
+
+\texttt{vertical\_game.py}: Sets \texttt{control\_mode="max"} (defender) and \texttt{disturbance\_mode="min"} (attacker).
+
+\subsubsection{Discrepancies}
+
+\begin{itemize}
+\item \textcolor{minblue}{\textbf{MINOR}}: \textbf{Optimization direction convention.} The paper states the defender \emph{minimizes} $\Phi_z$ (Eq.~26a). The code sets \texttt{control\_mode="max"}. These are \emph{equivalent} because the \texttt{hj\_reachability} library convention defines the sub-zero level set as the backward reachable tube, and the maximizer is the player trying to \emph{reach} the target. Since the target is the capture set, the defender (maximizer) reaching capture $\equiv$ defender minimizing distance. The sign of $\Phi_z$ is simply flipped relative to the paper. \textbf{No fix needed} -- conventions are internally consistent.
+\end{itemize}
+
+\noindent\textbf{Overall}: Vertical reach-avoid is \textbf{correctly implemented}.
+
+%----------------------------------------------------------------------
+\subsection{Horizontal Reach-Avoid Game ($\Phi_h$)}
+%----------------------------------------------------------------------
+
+\subsubsection{Paper (Section V.B)}
+
+The paper defines reach and avoid sets (Eq.~39):
+\begin{align}
+\mathcal{R}_h &= \{\mathbf{x}^h \mid \mathbf{x}^h_A \in \mathcal{T}\} \cup \{\mathbf{x}^h \mid \mathbf{p}^h_D \in \Omega_{\mathrm{obs}}\} \label{eq:Rh}\\
+\mathcal{A}_h &= \{\mathbf{x}^h \mid \mathbf{x}^{\mathrm{rel}}_h \in \mathcal{B}_h \wedge \mathbf{x}^h_A \notin \mathcal{T}\} \cup \{\mathbf{x} \mid \mathbf{x}_A \in \Omega_{\mathrm{obs}}\} \label{eq:Ah}
+\end{align}
+
+\textbf{Key}: The reach set $\mathcal{R}_h$ includes \emph{the attacker reaching the target $\mathcal{T}$}. The game value function $\Phi_h$ therefore accounts for the interaction between the defender trying to capture and the attacker trying to reach the goal, \emph{within a single PDE solve}.
+
+The winning regions (Eq.~22):
+\begin{align}
+\mathcal{W}_{A,h} &= \{\mathbf{x}^h \mid \Phi_h(\mathbf{x}^h) \leq 0\} \quad\text{(attacker wins)} \\
+\mathcal{W}_{D,h} &= \{\mathbf{x}^h \mid \Phi_h(\mathbf{x}^h) > 0\} \quad\text{(defender wins)}
+\end{align}
+
+\subsubsection{Code Implementation}
+
+\texttt{horizontal\_solver.py:202--277}:
+\begin{lstlisting}[language=Python]
+# Target: capture set only (NO attacker target region T)
+target_values = _make_horizontal_capture_set(grid, config.capture.d_h)
+
+# Avoid: walls + obstacles + complement(B_h) + attacker obstacles
+obstacle_values = _make_avoid_set_with_Bh(grid, config, v_h_t_data, d_h)
+attacker_obstacles = _make_attacker_obstacle_avoid_set(grid, config)
+obstacle_values = np.minimum(obstacle_values, attacker_obstacles)
+\end{lstlisting}
+
+\texttt{winning\_conditions.py:187}:
+\begin{lstlisting}[language=Python]
+in_w_d_h = phi_h_val <= 0  # Defender wins when phi_h <= 0
+\end{lstlisting}
+
+\subsubsection{Discrepancies}
+
+\begin{itemize}
+\item \textcolor{critred}{\textbf{CRITICAL}}: \textbf{Target region $\mathcal{T}$ missing from reach set.} The paper's $\mathcal{R}_h$ (Eq.~\ref{eq:Rh}) includes $\{\mathbf{x}^h_A \in \mathcal{T}\}$, meaning the value function $\Phi_h$ directly encodes whether the attacker can reach its goal while the defender tries to capture. The code only uses the \emph{capture set} as the BRT target and handles goal-reaching \emph{separately} via $T_{\mathrm{goal}}$ timing analysis.
+
+\textbf{Impact}: The code's winning region $\mathcal{W}_{D,h}$ does not account for the attacker's goal-reaching ability within the game. States where the attacker can reach $\mathcal{T}$ before capture may be incorrectly classified as defender-winning.
+
+\textbf{Fix}: Construct the reach set as per Eq.~\ref{eq:Rh}:
+\begin{lstlisting}[language=Python]
+# Reach set (for attacker): target_region OR defender_in_obstacle
+l_T = make_target_region_sdf(grid, config)  # attacker in T
+l_obs = make_defender_obstacle_sdf(grid, config)  # defender in obs
+reach_set = np.minimum(l_T, l_obs)
+\end{lstlisting}
+
+\item \textcolor{critred}{\textbf{CRITICAL}}: \textbf{Winning region sign convention.} The paper defines $\mathcal{W}_{D,h} = \{\Phi_h > 0\}$ (Eq.~22b). The code uses $\Phi_h \leq 0$ for defender winning. This inversion arises because the code solves a \emph{different} problem (capture-as-target from defender's perspective) rather than the paper's formulation (attacker reaching goal). The two formulations would give different value functions.
+
+\textbf{Fix}: If the reach set is corrected per the item above, the winning region convention must also match the paper: $\mathcal{W}_{D,h} = \{\Phi_h > 0\}$.
+
+\item \textcolor{modoran}{\textbf{MODERATE}}: \textbf{Avoid set missing $\mathbf{x}^h_A \notin \mathcal{T}$ condition.} Per Eq.~\ref{eq:Ah}, capture only counts as an avoid event (for the attacker) when the attacker is \emph{outside} $\mathcal{T}$. If the attacker is inside $\mathcal{T}$ at capture time, the attacker still wins. The code's avoid set does not enforce this condition.
+
+\textbf{Fix}: Modify the avoid set construction:
+\begin{lstlisting}[language=Python]
+# g_capture: negative inside capture set
+# g_not_T: negative when attacker NOT in T (i.e., positive in T)
+g_not_T = -make_target_region_sdf_attacker(grid, config)
+avoid_capture = np.maximum(g_capture, g_not_T)  # intersection
+\end{lstlisting}
+\end{itemize}
+
+%======================================================================
+\section{Defender Optimal Control}
+%======================================================================
+
+%----------------------------------------------------------------------
+\subsection{Algorithm 1: Vertical Reach-Track}
+%----------------------------------------------------------------------
+
+\subsubsection{Paper (Algorithm 1, p.~17)}
+
+\begin{enumerate}[nosep]
+\item \textbf{While} $\mathbf{x}^z \in \mathcal{W}_{D,z}$:
+\item \quad \textbf{If} $\mathbf{x}^{\mathrm{rel}}_z \notin \mathcal{B}_z$: Apply optimal reaching control from $\Phi_z$ (Eq.~26)
+\item \quad \textbf{Else if} deep inside $\mathcal{B}_z$ ($V_{z,\infty} - d_z \leq \epsilon$): Use performant tracker (e.g., PID)
+\item \quad \textbf{Else} (near boundary of $\mathcal{B}_z$): Apply optimal tracking from $V_{z,\infty}$ (Eq.~33)
+\end{enumerate}
+
+\subsubsection{Code Implementation}
+
+\texttt{defender\_node.py:193--247}: Implements all three modes with additions:
+\begin{itemize}[nosep]
+\item Checks winning region before applying optimal control
+\item Falls back to PID pursuit when outside $\mathcal{W}_{D,z}$
+\item Uses margin-based threshold: \texttt{near\_boundary = V\_z\_inf > (d\_z\_eff - margin)}
+\end{itemize}
+
+\subsubsection{Discrepancies}
+
+\begin{itemize}
+\item \textcolor{minblue}{\textbf{MINOR}}: \textbf{PID fallback outside winning region.} Paper's Algorithm~1 only operates while $\mathbf{x}^z \in \mathcal{W}_{D,z}$. The code adds a PID pursuit mode when outside the winning region. This is pragmatically useful but \emph{has no theoretical guarantee}.
+
+\item \textcolor{minblue}{\textbf{MINOR}}: \textbf{Deep-inside threshold differs.} Paper: $V_{z,\infty}(\mathbf{x}^{\mathrm{rel}}_z) - d_z \leq \epsilon$ (small $\epsilon$). Code: $V_{z,\infty} \leq d_z^{\mathrm{eff}} - 0.3 \cdot d_z$. The code uses a larger margin (30\% of $d_z$), meaning it switches to PID tracking \emph{earlier}. This is conservative but safe.
+\end{itemize}
+
+\noindent\textbf{Overall}: Algorithm~1 is \textbf{correctly implemented} with pragmatic additions.
+
+%----------------------------------------------------------------------
+\subsection{Algorithm 2: Horizontal Reach-Track-Avoid}
+%----------------------------------------------------------------------
+
+\subsubsection{Paper (Algorithm 2, p.~18)}
+
+\begin{enumerate}[nosep]
+\item \textbf{While} $\mathbf{x}^h \in \mathcal{W}_{D,h}$:
+\item \quad \textbf{If} $\mathbf{x}^{\mathrm{rel}}_h \notin \mathcal{B}_h$: Apply optimal reaching from $\Phi_h$ (Eq.~21)
+\item \quad \textbf{Else if} deep inside $\mathcal{B}_h$: Use performant tracker
+\item \quad \textbf{Else}: Apply horizontal tracking from $V_{h,\infty}$ (Eq.~37)
+\end{enumerate}
+
+\subsubsection{Code Implementation}
+
+\texttt{defender\_node.py:275--333}: Same structure as vertical with PID fallbacks.
+
+\subsubsection{Discrepancies}
+
+Same as Algorithm~1 (PID fallback, threshold differences). No additional issues beyond the $\Phi_h$ formulation problems described in Section~2.4.
+
+%----------------------------------------------------------------------
+\subsection{Control Extraction from Gradients}
+%----------------------------------------------------------------------
+
+\subsubsection{Paper}
+
+Defender optimal controls (Eqs.~21a, 26a, 33, 37) all follow:
+\begin{equation}
+\mathbf{u}^*_D = \arg\!\operatorname{opt}_{\mathbf{u}_D} \left(\frac{\partial \Phi}{\partial \mathbf{x}}\right)^{\!\top} f(\mathbf{x}, \mathbf{u}_A, \mathbf{u}_D)
+\end{equation}
+where ``opt'' is max or min depending on the specific game.
+
+For the double integrator, the control enters linearly through the velocity dynamics:
+\begin{equation}
+v^x_{D,\mathrm{dot}} = k_x(u_x - v^x_D) \implies \text{Hamiltonian contribution} = \frac{\partial\Phi}{\partial v^x_D} \cdot k_x \cdot u_x
+\end{equation}
+
+Bang-bang optimal control:
+\begin{equation}
+u^*_x = U^h_D \cdot \operatorname{sign}\!\left(\frac{\partial\Phi}{\partial v^x_D} \cdot k_x\right) \quad \text{(for maximization)}
+\end{equation}
+
+\subsubsection{Code Implementation}
+
+\texttt{horizontal\_game.py:65--68}:
+\begin{lstlisting}[language=Python]
+def opt_ctrl_numpy(self, state, spat_deriv):
+    u_x = np.where(spat_deriv[2] * self.k_x >= 0, self.u_d_h, -self.u_d_h)
+    u_y = np.where(spat_deriv[3] * self.k_y >= 0, self.u_d_h, -self.u_d_h)
+\end{lstlisting}
+
+\subsubsection{Discrepancies}
+
+\begin{itemize}
+\item \textcolor{critred}{\textbf{CRITICAL}}: \textbf{Control input constraints are box, not circular.} The paper specifies (Eq.~17a):
+\begin{equation}
+\sqrt{(v^{x,C}_D)^2 + (v^{y,C}_D)^2} \leq U^h_D
+\end{equation}
+The code uses a \textbf{box constraint}: $|v^{x,C}_D| \leq U^h_D$ and $|v^{y,C}_D| \leq U^h_D$ independently. This allows a maximum diagonal speed of $\sqrt{2} \cdot U^h_D \approx 8.49$ m/s instead of the paper's 6 m/s. The same applies to the attacker ($\sqrt{2} \cdot 3 \approx 4.24$ m/s vs.\ 3 m/s).
+
+\textbf{Impact}: Both players have $\sim$41\% more speed diagonally. The HJ solver computes value functions with these inflated capabilities, producing overly optimistic winning regions for \emph{both} players. The net effect on game outcome depends on the specific configuration but is non-trivial.
+
+\textbf{Fix}: Use \texttt{hj.sets.Ball} instead of \texttt{hj.sets.Box}:
+\begin{lstlisting}[language=Python]
+control_space=hj.sets.Ball(center=jnp.zeros(2), radius=self.u_d_h)
+\end{lstlisting}
+Alternatively, project box controls onto the circular constraint in the online controller:
+\begin{lstlisting}[language=Python]
+speed = np.sqrt(u_x**2 + u_y**2)
+if speed > U_D_h:
+    scale = U_D_h / speed
+    u_x, u_y = u_x * scale, u_y * scale
+\end{lstlisting}
+\end{itemize}
+
+%======================================================================
+\section{Attacker Optimal Control}
+%======================================================================
+
+%----------------------------------------------------------------------
+\subsection{Attacker Reaching ($T_{\mathrm{goal}}$ Computation)}
+%----------------------------------------------------------------------
+
+\subsubsection{Paper (Section VI, Eq.~40--42)}
+
+The paper solves a separate reachability problem for the attacker:
+\begin{align}
+\mathcal{R}_h &= \{\mathbf{x}^h_A \mid \mathbf{x}^h_A \in \mathcal{T}\} \\
+\mathcal{A}_h &= \{\mathbf{x}^h_A \mid \mathbf{x}^h_A \in \Omega_{\mathrm{obs}}\}
+\end{align}
+The earliest time to reach goal: $T_{\mathrm{goal}}(\mathbf{x}) = \min\{t \mid \zeta^{\mathbf{u}^*_A(\cdot)}_{\mathbf{x}}(t) \in \mathcal{T}\}$.
+
+$T_{\mathrm{goal}}$ is extracted from the value function by finding when $\Phi^{\mathrm{reach}}_{A,h}$ changes sign during the backward solve (analogous to $T_{\mathrm{capture}}$ in Eq.~28).
+
+\subsubsection{Code Implementation}
+
+\texttt{horizontal\_solver.py:383--470}: Solves attacker reaching with obstacles.
+
+\texttt{winning\_conditions.py:25--59}: Estimates $T_{\mathrm{goal}}$:
+\begin{lstlisting}[language=Python]
+def compute_T_goal(phi_a_reach, attacker_pos, time_horizon=10.0):
+    value = interpolate_value(phi_a_reach, attacker_pos)
+    if value <= 0:
+        t_remaining = abs(value) / u_a_h
+        return max(0.0, time_horizon - t_remaining)
+    else:
+        return float("inf")
+\end{lstlisting}
+
+\subsubsection{Discrepancies}
+
+\begin{itemize}
+\item \textcolor{modoran}{\textbf{MODERATE}}: \textbf{$T_{\mathrm{goal}}$ estimated via linear approximation.} The paper extracts $T_{\mathrm{goal}}$ from time-sliced value functions (finding the earliest sign change). The code approximates $T_{\mathrm{goal}} \approx T - |V|/U^h_A$, which assumes a linear relationship between value magnitude and time. This is inaccurate for states far from the boundary or in the presence of obstacles.
+
+\textbf{Fix}: Save time slices during attacker reaching computation (like \texttt{phi\_z\_time\_slices.npz}) and use interpolation through slices to find exact $T_{\mathrm{goal}}$.
+
+\item \textcolor{minblue}{\textbf{MINOR}}: \textbf{Attacker reaching solver missing wall constraints.} The solver includes static obstacles but does \emph{not} include arena walls as avoid sets for the attacker, potentially underestimating $T_{\mathrm{goal}}$ for attacker positions near walls.
+\end{itemize}
+
+%----------------------------------------------------------------------
+\subsection{Attacker Escape Control (Online)}
+%----------------------------------------------------------------------
+
+\subsubsection{Paper}
+
+Horizontal (Eq.~21b): $(\mathbf{u}^h_A)^* = \arg\min_{\mathbf{u}^h_A} \left(\frac{\partial\Phi_h}{\partial\mathbf{x}^h}\right)^\top f_h$
+
+Vertical (Eq.~26b): $(\mathbf{u}^z_A)^* = \arg\max_{\mathbf{u}^z_A} \left(\frac{\partial\Phi_z}{\partial\mathbf{x}^z}\right)^\top f_z$
+
+\subsubsection{Code Implementation}
+
+\texttt{attacker\_node.py:263--329}:
+\begin{lstlisting}[language=Python]
+# Horizontal: attacker minimizes (correct)
+cmd.linear.x = -U_A_h if grad_xa >= 0 else U_A_h
+cmd.linear.y = -U_A_h if grad_ya >= 0 else U_A_h
+
+# Vertical: attacker minimizes (matches code convention)
+cmd.linear.z = -U_A_z if grad_za >= 0 else U_A_z
+\end{lstlisting}
+
+\subsubsection{Discrepancies}
+
+\begin{itemize}
+\item \textcolor{minblue}{\textbf{MINOR}}: The paper says the attacker \emph{maximizes} in the vertical game (Eq.~26b), while the code \emph{minimizes}. This is consistent because the code's $\Phi_z$ has opposite sign convention from the paper's. Both result in the attacker moving \emph{away} from the defender.
+
+\item \textcolor{modoran}{\textbf{MODERATE}}: \textbf{Box constraint for attacker.} Same as defender (Section~3.3) -- the attacker's horizontal control space is box $[-U^h_A, U^h_A]^2$ instead of circular. This gives the attacker 41\% more diagonal speed, overstating its capability beyond the already-conservative single integrator assumption.
+
+\item \textcolor{modoran}{\textbf{MODERATE}}: \textbf{Attacker uses game value functions for online control, not reaching value functions.} The attacker's online controller uses $\Phi_h$ (game value) and $\Phi_z$ to compute escape controls. But the paper's attacker (Eq.~42) uses the \emph{reaching} value function $\Phi^{\mathrm{reach}}_{A,h}$ for goal-directed control. The game value function makes the attacker play optimally against the defender, while the reaching function makes the attacker pursue the goal optimally. In practice, the game-optimal attacker is a harder opponent, so this is \emph{conservative} from the defender's perspective.
+\end{itemize}
+
+%======================================================================
+\section{Winning Condition Analysis}
+%======================================================================
+
+\subsubsection{Paper (Section VI)}
+
+\textbf{Proposition 1}: If $T_{\mathrm{goal}}(\mathbf{x}^h_A) \leq T_{\mathrm{capture}}(\mathbf{x}^z)$, the attacker wins.
+
+\textbf{Theorem}: Defender wins if $\mathbf{x}^z \in \mathcal{W}_{D,z}$, $T_{\mathrm{goal}}(\mathbf{x}^h_A) > T_{\mathrm{capture}}(\mathbf{x}^z)$, and $\mathbf{x}^h \in \mathcal{W}_{D,h}$.
+
+\subsubsection{Code Implementation}
+
+\texttt{winning\_conditions.py:144--234}:
+\begin{lstlisting}[language=Python]
+# Check: phi_h <= 0 AND phi_z <= 0 AND T_goal > T_capture
+defender_wins = in_w_d_h and in_w_d_z and (t_goal > t_capture)
+\end{lstlisting}
+
+\subsubsection{Discrepancies}
+
+\begin{itemize}
+\item \textcolor{critred}{\textbf{CRITICAL}}: \textbf{Winning condition compounds upstream errors.} Because $\Phi_h$ is computed with the wrong formulation (missing target region), $\mathcal{W}_{D,h}$ is inaccurate. The $T_{\mathrm{goal}}$ estimation is approximate. Together, these can cause incorrect game outcome predictions.
+
+\item \textcolor{modoran}{\textbf{MODERATE}}: \textbf{$T_{\mathrm{capture}}$ estimation.} \texttt{compute\_T\_capture} (line~62--90) uses the same linear approximation as $T_{\mathrm{goal}}$. The more accurate \texttt{compute\_T\_capture\_from\_slices} exists (line~93--141) but is not used by default in \texttt{check\_defender\_wins}.
+
+\textbf{Fix}: Use \texttt{compute\_T\_capture\_from\_slices} when time slices are available.
+\end{itemize}
+
+%======================================================================
+\section{Wall Avoidance Safety Layer}
+%======================================================================
+
+\textbf{Not in the paper.} The code adds a wall-avoidance post-processing layer (\texttt{defender\_node.py:137--191} and \texttt{numerical\_sim.py:28--62}) that scales down or overrides optimal control commands near arena boundaries.
+
+\begin{itemize}
+\item \textcolor{modoran}{\textbf{MODERATE}}: This layer can \textbf{override the optimal game-theoretic control}, potentially breaking the theoretical capture guarantees. For example, if the optimal control commands the defender toward a wall to intercept the attacker, the safety layer may reduce this command, allowing the attacker to escape.
+
+\textbf{Mitigation}: The paper's formulation includes walls in the obstacle set $\Omega_{\mathrm{obs}}$, so the optimal control from $\Phi_h$ already accounts for wall avoidance. If the value function is correctly computed with wall constraints, the optimal control should never command the defender into a wall. The safety layer should only be needed as a numerical robustness measure (grid interpolation artifacts near boundaries), not as a primary wall avoidance mechanism.
+\end{itemize}
+
+%======================================================================
+\section{Summary of Discrepancies}
+%======================================================================
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}p{0.5cm}p{1.2cm}p{5.5cm}p{4.5cm}@{}}
+\toprule
+\textbf{\#} & \textbf{Severity} & \textbf{Description} & \textbf{Impact} \\
+\midrule
+1 & \textcolor{critred}{CRIT} & Horizontal game missing $\mathcal{T}$ in reach set & $\mathcal{W}_{D,h}$ doesn't account for attacker goal \\
+2 & \textcolor{critred}{CRIT} & Box control constraints (not circular) & 41\% extra diagonal speed for both players \\
+3 & \textcolor{critred}{CRIT} & $V_{h,T}$ in 4D without obstacles & $\mathcal{B}_h$ may include obstacle-collision states \\
+4 & \textcolor{modoran}{MOD} & $T_{\mathrm{goal}}/T_{\mathrm{capture}}$ linear estimation & Inaccurate timing, wrong game outcomes \\
+5 & \textcolor{modoran}{MOD} & $d_z^{\mathrm{eff}}/d_h^{\mathrm{eff}}$ threshold fallbacks & Weakened invariant set guarantees \\
+6 & \textcolor{modoran}{MOD} & Wall avoidance overrides optimal ctrl & Breaks capture guarantees near walls \\
+7 & \textcolor{modoran}{MOD} & Avoid set missing $\mathbf{x}^h_A \notin \mathcal{T}$ & Capture inside target counts incorrectly \\
+8 & \textcolor{modoran}{MOD} & Attacker uses game VF not reaching VF & More adversarial than paper (conservative) \\
+9 & \textcolor{minblue}{MINOR} & PID fallback outside winning region & No theoretical guarantee (pragmatic) \\
+10 & \textcolor{minblue}{MINOR} & Dev grid resolution too coarse & Numerical inaccuracy (not a code bug) \\
+\bottomrule
+\end{tabular}
+\caption{Summary of all identified discrepancies between paper and code.}
+\label{tab:summary}
+\end{table}
+
+%======================================================================
+\section{Recommended Fixes (Prioritized)}
+%======================================================================
+
+\subsection{Priority 1: Fix Horizontal Game Formulation}
+\textbf{Files}: \texttt{horizontal\_solver.py}, \texttt{winning\_conditions.py}
+
+\begin{enumerate}[nosep]
+\item Add target region $\mathcal{T}$ SDF to the horizontal reach set (Eq.~\ref{eq:Rh})
+\item Add ``attacker not in $\mathcal{T}$'' condition to avoid set (Eq.~\ref{eq:Ah})
+\item Update winning region convention: $\mathcal{W}_{D,h} = \{\Phi_h > 0\}$
+\item Re-derive optimal control signs for the corrected formulation
+\end{enumerate}
+
+\subsection{Priority 2: Fix Control Constraint Geometry}
+\textbf{Files}: \texttt{horizontal\_game.py}, \texttt{vertical\_game.py}, \texttt{horizontal\_relative.py}, \texttt{attacker\_reaching.py}
+
+\begin{enumerate}[nosep]
+\item Replace \texttt{hj.sets.Box} with \texttt{hj.sets.Ball} for all horizontal control/disturbance spaces
+\item Add post-hoc speed clamping in online controllers as a safety check
+\item Vertical controls are 1D scalars -- box constraint $|u_z| \leq U^z$ is correct as-is
+\end{enumerate}
+
+\subsection{Priority 3: Use 6D Horizontal Max Distance}
+\textbf{Files}: \texttt{horizontal\_solver.py}, \texttt{compute\_horizontal.py}
+
+\begin{enumerate}[nosep]
+\item Make \texttt{solve\_horizontal\_max\_distance\_6d} the default pipeline
+\item This is already implemented but not wired as default
+\item Increases computation time substantially; consider for ``medium'' and ``paper'' presets only
+\end{enumerate}
+
+\subsection{Priority 4: Improve $T_{\mathrm{goal}}/T_{\mathrm{capture}}$ Accuracy}
+\textbf{Files}: \texttt{winning\_conditions.py}, \texttt{horizontal\_solver.py}
+
+\begin{enumerate}[nosep]
+\item Save time slices during attacker reaching computation
+\item Use \texttt{compute\_T\_capture\_from\_slices}-style interpolation for both $T_{\mathrm{capture}}$ and $T_{\mathrm{goal}}$
+\item Fall back to linear estimation only when slices unavailable
+\end{enumerate}
+
+\subsection{Priority 5: Address Wall Avoidance Integration}
+\textbf{Files}: \texttt{defender\_node.py}, \texttt{numerical\_sim.py}
+
+\begin{enumerate}[nosep]
+\item Ensure walls are properly included in $\Omega_{\mathrm{obs}}$ for the HJ solver
+\item Reduce aggressiveness of safety layer (use as last-resort, not primary avoidance)
+\item Consider removing safety layer entirely once value functions are correctly computed with walls
+\end{enumerate}
+
+%======================================================================
+\section{Conclusion}
+%======================================================================
+
+The codebase implements the core algorithmic framework from the paper (HJ decomposition, reach-track control, invariant capture sets) with generally correct dynamics and solver integration. However, three critical discrepancies -- the missing target region in the horizontal game, box vs.\ circular control constraints, and the 4D tracking value function without obstacles -- likely explain the observed failing behaviors.
+
+The most impactful fix is correcting the horizontal game formulation (Priority~1), which would produce a value function that properly accounts for the interaction between capture and goal-reaching. Combined with fixing the control constraints (Priority~2), these changes should significantly improve game outcomes and match the paper's theoretical guarantees.
+
+\end{document}
