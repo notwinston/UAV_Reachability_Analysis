@@ -18,7 +18,14 @@ def main(args=None):
         import yaml
         import numpy as np
         import sys as _sys
-        _sys.path.insert(0, '/workspace/reach_avoid_ws/src/reach_avoid_controller')
+        import os as _os
+        for _candidate in [
+            '/home/simuser/ws/src/reach_avoid_controller',
+            '/workspace/reach_avoid_ws/src/reach_avoid_controller',
+            '/workspaces/UAV_Reachability_Analysis/reach_avoid_ws/src/reach_avoid_controller',
+        ]:
+            if _os.path.isdir(_candidate) and _candidate not in _sys.path:
+                _sys.path.insert(0, _candidate)
         from reach_avoid_controller.value_function_loader import ValueFunctionLoader
 
         class AttackerControllerNode(Node):
@@ -35,7 +42,7 @@ def main(args=None):
                 self.declare_parameter('target_y', 4.0)
                 self.declare_parameter('target_z', 2.0)
                 self.declare_parameter('waypoints', [0.0])
-                self.declare_parameter('value_function_dir', '/workspace/data/value_functions/')
+                self.declare_parameter('value_function_dir', '/home/simuser/ws/data/value_functions/')
                 self.declare_parameter('target_altitude', 10.0)
 
                 self._mode = self.get_parameter('mode').value

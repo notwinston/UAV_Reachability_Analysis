@@ -5,11 +5,52 @@ PX4 SITL with gz_x500 spawns x500_defender and x500_attacker drones.
 """
 
 import os
+import socket
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+
+def _find_path(candidates, fallback):
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return fallback
+
+
+def _get_display():
+    """Return a working DISPLAY value, or None for headless.
+
+    Priority:
+    1. Xvfb / native socket if /tmp/.X11-unix/X<n> exists for current DISPLAY
+    2. host.docker.internal:0 (Docker Desktop / Windows XLaunch via TCP)
+    3. None (headless)
+    """
+    display = os.environ.get('DISPLAY', '')
+    if display:
+        # Check if the Unix socket exists for this display number
+        num = display.split(':', 1)[-1].split('.')[0]
+        if os.path.exists(f'/tmp/.X11-unix/X{num}'):
+            return display
+
+    # Try Docker Desktop Windows host (VcXsrv / XLaunch)
+    try:
+        host = socket.gethostbyname('host.docker.internal')
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        s.connect((host, 6000))
+        s.close()
+        return 'host.docker.internal:0'
+    except Exception:
+        pass
+
+    # Fallback: Xvfb on :1 if it's running
+    if os.path.exists('/tmp/.X11-unix/X1'):
+        return ':1'
+
+    return None
 
 
 def get_px4_path():
@@ -66,10 +107,17 @@ def generate_launch_description():
         px4_plugins,
     ]))
     gazebo_env['GZ_SIM_SERVER_CONFIG_PATH'] = px4_server_config
-    # Run Gazebo headless (-s server-only) when no DISPLAY is available
+    gazebo_env['LIBGL_ALWAYS_SOFTWARE'] = '1'
+    # Detect working X11 display (handles Docker/WSL2/XLaunch setups)
+    active_display = _get_display()
     gz_cmd = ['gz', 'sim', '-r']
-    if not os.environ.get('DISPLAY'):
-        gz_cmd.append('-s')  # headless server mode
+    if active_display:
+        # Set DISPLAY in environment so all child processes (Gazebo, RViz, etc.) inherit it
+        os.environ['DISPLAY'] = active_display
+        gazebo_env['DISPLAY'] = active_display
+        gazebo_env['QT_X11_NO_MITSHM'] = '1'  # avoids shared-memory X11 issues in containers
+    else:
+        gz_cmd.append('-s')  # headless server mode (no GUI)
     gz_cmd.append(LaunchConfiguration('world_file'))
 
     gazebo = ExecuteProcess(
@@ -230,6 +278,11 @@ def generate_launch_description():
         41.5, 12.5, 10.0,   # Target center
     ]
 
+    vf_default = _find_path([
+        os.path.join(os.path.expanduser('~'), 'ws', 'data', 'value_functions'),
+        '/workspace/data/value_functions',
+    ], '/workspace/data/value_functions')
+
     attacker_controller = Node(
         package='attacker_controller',
         executable='attacker_node',
@@ -242,7 +295,7 @@ def generate_launch_description():
             'target_y': 12.5,
             'target_z': 10.0,
             'waypoints': attacker_waypoints,
-            'value_function_dir': '/workspace/data/value_functions/',
+            'value_function_dir': vf_default,
             'target_altitude': 10.0,
         }],
         output='screen',
@@ -261,13 +314,31 @@ def generate_launch_description():
         ],
     )
 
+    # Kill any stale processes from previous runs before starting fresh
+    px4_rootfs = os.path.join(
+        get_px4_path(), 'build', 'px4_sitl_default', 'rootfs'
+    )
+    cleanup = ExecuteProcess(
+        cmd=['bash', '-c',
+             # Use -x (exact name) so these pkill commands never kill this bash script itself
+             'pkill -9 -x MicroXRCEAgent 2>/dev/null; '
+             'pkill -9 -x px4 2>/dev/null; '
+             'pkill -9 -x kinematic_sim 2>/dev/null; '
+             'fuser -k 8888/udp 2>/dev/null; '
+             f'rm -f /tmp/px4_lock-1 /tmp/px4_lock-2; '
+             f'rm -rf {px4_rootfs}/1 {px4_rootfs}/2; '
+             'sleep 1.5'],
+        output='screen',
+    )
+
     return LaunchDescription([
         attacker_mode_arg,
         world_file_arg,
         px4_dir_arg,
+        cleanup,
         gazebo,
         gz_bridge,
-        xrce_dds_agent,
+        TimerAction(period=1.0, actions=[xrce_dds_agent]),  # brief delay after cleanup
         px4_processes,
         delayed_controllers,
     ])

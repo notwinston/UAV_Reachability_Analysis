@@ -17,8 +17,7 @@ def main(args=None):
             OffboardControlMode,
             TrajectorySetpoint,
             VehicleCommand,
-            VehicleOdometry,
-            VehicleStatus,
+            VehicleLocalPosition,
         )
 
         class PX4AdapterNode(Node):
@@ -38,10 +37,9 @@ def main(args=None):
                 prefix = self.get_parameter('fmu_topic_prefix').value
                 fmu_prefix = f'/{prefix}/' if prefix else '/'
 
-                # QoS for PX4 topics (best-effort, transient local)
-                qos_px4 = QoSProfile(
+                qos_sub = QoSProfile(
                     reliability=ReliabilityPolicy.BEST_EFFORT,
-                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    durability=DurabilityPolicy.VOLATILE,
                     history=HistoryPolicy.KEEP_LAST,
                     depth=1,
                 )
@@ -50,27 +48,15 @@ def main(args=None):
                 self.cmd_vel_sub = self.create_subscription(
                     Twist, cmd_vel_topic, self._cmd_vel_callback, 10
                 )
-                qos_sub = QoSProfile(
-                    reliability=ReliabilityPolicy.BEST_EFFORT,
-                    durability=DurabilityPolicy.VOLATILE,
-                    history=HistoryPolicy.KEEP_LAST,
-                    depth=1,
-                )
-                # Try both vehicle_status and vehicle_status_v3 (PX4 version varies)
-                for suffix in ['vehicle_status', 'vehicle_status_v3']:
+                # Use VehicleLocalPosition to detect DDS connection —
+                # avoids px4_msgs/VehicleStatus payload-size mismatch across PX4 versions.
+                for suffix in ['vehicle_local_position', 'vehicle_local_position_v1']:
                     self.create_subscription(
-                        VehicleStatus,
+                        VehicleLocalPosition,
                         f'{fmu_prefix}fmu/out/{suffix}',
-                        self._vehicle_status_callback,
+                        self._local_pos_callback,
                         qos_sub,
                     )
-                # Odometry for altitude tracking during takeoff
-                self.create_subscription(
-                    VehicleOdometry,
-                    f'{fmu_prefix}fmu/out/vehicle_odometry',
-                    self._odometry_callback,
-                    qos_sub,
-                )
 
                 # Publishers to PX4 (volatile QoS to match PX4's DDS config)
                 qos_pub = QoSProfile(
@@ -99,17 +85,18 @@ def main(args=None):
                 # State
                 self._cmd_vel = Twist()
                 self._offboard_setpoint_count = 0
-                self._armed = False
-                self._offboard_engaged = False
-                self._nav_state = 0
+                # In SITL, offboard mode and arm commands work reliably once DDS is live.
+                # We assume success after a small number of sent commands rather than
+                # waiting for VehicleStatus (which has a payload-size mismatch in this setup).
+                self._offboard_sent = 0   # count of DO_SET_MODE commands sent
+                self._arm_sent = 0        # count of arm commands sent
+                self._armed = False       # set True after arm commands are sent
+                self._offboard_engaged = False  # set True after offboard commands sent
                 self._px4_connected = False
-                self._last_arm_time = 0.0
-                self._arm_attempts = 0
+                self._last_cmd_time = 0.0
                 self._startup_count = 0
-                self._takeoff_count = 0
-                self._takeoff_done = False
-                self._takeoff_altitude = 3.0  # meters above ground
-                self._current_z = 0.0  # NED z from odometry (negative = above ground)
+                # Takeoff is skipped: drones spawn at their operating altitude in Gazebo.
+                self._takeoff_done = True
 
                 # 20Hz heartbeat timer (offboard mode requires continuous commands)
                 self._timer = self.create_timer(0.05, self._timer_callback)
@@ -123,22 +110,11 @@ def main(args=None):
                 """Store latest velocity command."""
                 self._cmd_vel = msg
 
-            def _vehicle_status_callback(self, msg: VehicleStatus):
-                """Track PX4 connection, arming state, and nav state."""
-                self._px4_connected = True
-                was_armed = self._armed
-                self._armed = (msg.arming_state == VehicleStatus.ARMING_STATE_ARMED)
-                self._nav_state = msg.nav_state
-                if self._armed and not was_armed:
-                    self.get_logger().info('PX4 confirmed ARMED')
-                # Check if offboard mode is actually engaged (nav_state 14 = offboard)
-                if msg.nav_state == 14 and not self._offboard_engaged:
-                    self._offboard_engaged = True
-                    self.get_logger().info('PX4 confirmed OFFBOARD mode')
-
-            def _odometry_callback(self, msg: VehicleOdometry):
-                """Track current altitude from PX4 odometry (NED frame)."""
-                self._current_z = msg.position[2]  # NED: negative = above ground
+            def _local_pos_callback(self, msg: VehicleLocalPosition):
+                """Detect PX4 DDS connection from local position heartbeat."""
+                if not self._px4_connected:
+                    self._px4_connected = True
+                    self.get_logger().info('PX4 DDS connection established')
 
             def _timer_callback(self):
                 """20Hz heartbeat: publish offboard mode and velocity setpoints."""
@@ -148,64 +124,45 @@ def main(args=None):
                 # Publish velocity setpoint (ENU -> NED conversion)
                 self._publish_velocity_setpoint()
 
-                # Wait for PX4 to connect (or assume connected after 15s = 300 ticks)
-                # GPS needs time to converge before arming
-                self._startup_count += 1
-                if not self._px4_connected and self._startup_count < 300:
+                # Phase 1: Wait for PX4 DDS connection (local_position received)
+                if not self._px4_connected:
+                    self._startup_count += 1
+                    if self._startup_count % 100 == 0:  # log every 5s
+                        self.get_logger().info(
+                            f'Waiting for PX4 DDS connection... ({self._startup_count // 20}s)'
+                        )
                     return
-                if not self._px4_connected and self._startup_count == 300:
-                    self.get_logger().warn('No vehicle_status received, proceeding anyway')
-                    self._px4_connected = True
 
-                # Phase 1: Send setpoints for 2s before requesting offboard mode
+                # Phase 2: Send offboard mode heartbeat for 2s before requesting mode switch
                 if self._offboard_setpoint_count < 40:
                     self._offboard_setpoint_count += 1
                     return
 
-                # Phase 2: Engage offboard mode (retry every 2s until confirmed)
+                # Phase 3: Request offboard mode (3 attempts, 2s apart, then assume done)
                 if not self._offboard_engaged:
                     now = self.get_clock().now().nanoseconds / 1e9
-                    if self._arm_attempts == 0 or now - self._last_arm_time >= 2.0:
+                    if self._offboard_sent == 0 or now - self._last_cmd_time >= 2.0:
                         self._engage_offboard_mode()
-                        self._last_arm_time = now
-                        self._arm_attempts += 1
-                        if self._arm_attempts >= 5:
-                            self.get_logger().warn(
-                                'Offboard mode not confirmed after 5 attempts, proceeding'
-                            )
+                        self._last_cmd_time = now
+                        self._offboard_sent += 1
+                        if self._offboard_sent >= 3:
                             self._offboard_engaged = True
-                            self._arm_attempts = 0
+                            self.get_logger().info('Offboard mode requested (3 commands sent)')
                     return
 
-                # Phase 3: Arm the vehicle (retry every 2s until confirmed)
+                # Phase 4: Force-arm (2 attempts, 2s apart, then assume armed)
                 if not self._armed:
                     now = self.get_clock().now().nanoseconds / 1e9
-                    if now - self._last_arm_time >= 2.0:
+                    if self._arm_sent == 0 or now - self._last_cmd_time >= 2.0:
                         self._arm()
-                        self._last_arm_time = now
-                        self._arm_attempts += 1
-                        if self._arm_attempts >= 5:
-                            self.get_logger().warn(
-                                'Arm not confirmed after 5 attempts, assuming armed'
-                            )
+                        self._last_cmd_time = now
+                        self._arm_sent += 1
+                        if self._arm_sent >= 2:
                             self._armed = True
+                            self.get_logger().info('Armed (force-arm commands sent)')
                     return
 
-                # Phase 4: Takeoff to target altitude before forwarding cmd_vel
-                if not self._takeoff_done:
-                    self._takeoff_count += 1
-                    # Check if we've reached target altitude (NED: z is negative when above ground)
-                    altitude = -self._current_z
-                    if altitude >= self._takeoff_altitude * 0.9:
-                        self._takeoff_done = True
-                        self.get_logger().info(
-                            f'Takeoff complete at {altitude:.1f}m, forwarding cmd_vel'
-                        )
-                    elif self._takeoff_count > 200:  # 10s timeout
-                        self._takeoff_done = True
-                        self.get_logger().warn(
-                            f'Takeoff timeout at {altitude:.1f}m, forwarding cmd_vel'
-                        )
+                # Phase 5: Forwarding cmd_vel to PX4 offboard velocity control.
 
             def _publish_offboard_control_mode(self):
                 """Publish offboard control mode requesting velocity control."""
@@ -223,27 +180,21 @@ def main(args=None):
 
                 Game/Gazebo ENU: x=east, y=north, z=up
                 PX4 NED:  x=north, y=east, z=down
-                Velocities are clamped to prevent motor saturation in simulation.
                 """
                 msg = TrajectorySetpoint()
 
-                if self._armed and self._takeoff_done:
-                    # Normal operation: forward cmd_vel
-                    # Match game parameters: U_D_h=6.0 m/s, U_D_z=4.0 m/s
+                if self._armed:
+                    # Forward cmd_vel from game controller (ENU -> NED conversion)
+                    # Clamp to game speed limits: U_D_h=6.0 m/s, U_D_z=4.0 m/s
                     max_h = 6.0
                     max_v = 4.0
                     vx = max(-max_h, min(max_h, self._cmd_vel.linear.x))
                     vy = max(-max_h, min(max_h, self._cmd_vel.linear.y))
                     vz = max(-max_v, min(max_v, self._cmd_vel.linear.z))
-                    # ENU -> NED coordinate conversion
-                    msg.velocity[0] = vy    # NED x (north) = ENU y (north)
-                    msg.velocity[1] = vx    # NED y (east) = ENU x (east)
-                    msg.velocity[2] = -vz   # NED z (down) = -ENU z (up)
-                elif self._armed and not self._takeoff_done:
-                    # Takeoff: climb at 1 m/s (NED z = -1.0 = upward)
-                    msg.velocity[0] = 0.0
-                    msg.velocity[1] = 0.0
-                    msg.velocity[2] = -1.0
+                    # ENU -> NED: north=ENU_y, east=ENU_x, down=-ENU_z
+                    msg.velocity[0] = vy
+                    msg.velocity[1] = vx
+                    msg.velocity[2] = -vz
                 else:
                     # Pre-arm: hold zero velocity (required heartbeat for offboard)
                     msg.velocity[0] = 0.0
@@ -297,20 +248,12 @@ def main(args=None):
 
             @staticmethod
             def enu_to_ned(x_enu, y_enu, z_enu):
-                """Convert ENU coordinates to NED.
-
-                ENU: x=east, y=north, z=up
-                NED: x=north, y=east, z=down
-                """
+                """Convert ENU coordinates to NED."""
                 return y_enu, x_enu, -z_enu
 
             @staticmethod
             def ned_to_enu(x_ned, y_ned, z_ned):
-                """Convert NED coordinates to ENU.
-
-                NED: x=north, y=east, z=down
-                ENU: x=east, y=north, z=up
-                """
+                """Convert NED coordinates to ENU."""
                 return y_ned, x_ned, -z_ned
 
         rclpy.init(args=args)

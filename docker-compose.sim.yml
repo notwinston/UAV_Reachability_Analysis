@@ -18,20 +18,17 @@ services:
       - ROS_DOMAIN_ID=0
       - PX4_SIM_MODEL=gz_x500
       - PX4_GZ_WORLD=reach_avoid_arena
-      # Uncomment for X11 GUI (requires XQuartz on Mac or X11 on Linux):
-      # - DISPLAY=${DISPLAY}
-      # - QT_X11_NO_MITSHM=1
+      - DISPLAY=host.docker.internal:0.0
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_SOFTWARE=1
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ./data/value_functions:/home/simuser/ws/data/value_functions:ro
       - ./config:/home/simuser/ws/config:ro
-    # Uncomment for NVIDIA GPU machines:
-    # runtime: nvidia
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    command: ros2 launch reach_avoid_bringup full_game.launch.py
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        source /opt/ros/humble/setup.bash
+        source /opt/px4_ros_ws/install/setup.bash
+        source /home/simuser/ws/install/setup.bash
+        exec ros2 launch reach_avoid_bringup full_game.launch.py

@@ -141,15 +141,24 @@ def HJSolver(
         )
     elif mode == "minVWithV0":
         if constraint is not None and "ObstacleSetMode" in compMethod:
+            # Reach-avoid BRT (Fisac 2015):
+            #   obs = constraint = -obstacle_values > 0 inside obstacles
+            #   min(v, l): BRT clamp — target states stay captured (V <= l)
+            #   max(..., obs): obstacle states forced positive (V >= obs > 0 = defender loses)
             obs = jnp.array(constraint.astype(np.float64))
             def reach_avoid_pp(t, v):
-                return jnp.maximum(v, jnp.minimum(initial_values, -obs))
+                return jnp.maximum(jnp.minimum(v, initial_values), obs)
             solver_settings = hj.SolverSettings.with_accuracy(
                 accuracy,
                 value_postprocessor=reach_avoid_pp,
             )
         else:
-            solver_settings = hj.SolverSettings.with_accuracy(accuracy)
+            # BRT (backward reachable tube): clamp with min so states that enter
+            # the target set stay captured as time propagates backward.
+            solver_settings = hj.SolverSettings.with_accuracy(
+                accuracy,
+                value_postprocessor=lambda t, v: jnp.minimum(v, initial_values),
+            )
     elif mode == "none":
         solver_settings = hj.SolverSettings.with_accuracy(accuracy)
     else:

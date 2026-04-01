@@ -10,7 +10,7 @@
   <depend>attacker_controller</depend>
   <depend>reach_avoid_sim</depend>
   <depend>reach_avoid_viz</depend>
-  <depend>reach_avoid_hw</depend>
+  <!-- <depend>reach_avoid_hw</depend> -->
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>ros_gz</exec_depend>
   <buildtool_depend>ament_python</buildtool_depend>

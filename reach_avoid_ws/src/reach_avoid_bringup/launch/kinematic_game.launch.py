@@ -24,8 +24,9 @@ def generate_launch_description():
 
     vf_default = _find_path([
         os.path.join(os.path.expanduser('~'), 'ws', 'data', 'value_functions'),
+        '/workspaces/UAV_Reachability_Analysis/data/value_functions',
         '/workspace/data/value_functions',
-    ], '/workspace/data/value_functions')
+    ], '/workspaces/UAV_Reachability_Analysis/data/value_functions')
 
     gp_default = _find_path([
         os.path.join(os.path.expanduser('~'), 'ws', 'config', 'game_params.yaml'),
@@ -79,7 +80,7 @@ def generate_launch_description():
             'target_y': 12.5,
             'target_z': 10.0,
             'waypoints': attacker_waypoints,
-            'value_function_dir': '/workspace/data/value_functions/',
+            'value_function_dir': LaunchConfiguration('value_function_dir'),
             'target_altitude': 10.0,
         }],
         output='screen',

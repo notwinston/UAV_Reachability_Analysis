@@ -72,6 +72,29 @@ class HorizontalGameDynamics(hj.ControlAndDisturbanceAffineDynamics):
         d_y = np.where(spat_deriv[5] >= 0, -self.u_a_h, self.u_a_h)
         return d_x, d_y
 
+    # --- odp.dynamics.HorizontalGame6D-compatible interface ---
+
+    def optCtrl_inPython(self, state, spat_deriv):
+        """Optimal defender control (odp-style). Returns (u_x, u_y)."""
+        u_x = float(self.u_d_h if spat_deriv[2] * self.k_x >= 0 else -self.u_d_h)
+        u_y = float(self.u_d_h if spat_deriv[3] * self.k_y >= 0 else -self.u_d_h)
+        return u_x, u_y
+
+    def optDstb_inPython(self, state, spat_deriv):
+        """Optimal attacker disturbance (odp-style). Returns (d_x, d_y)."""
+        d_x = float(-self.u_a_h if spat_deriv[4] >= 0 else self.u_a_h)
+        d_y = float(-self.u_a_h if spat_deriv[5] >= 0 else self.u_a_h)
+        return d_x, d_y
+
+    def dynamics_inPython(self, state, u_x, u_y, d_x, d_y):
+        """State derivatives (pure Python tuple)."""
+        return (
+            state[2], state[3],
+            self.k_x * (u_x - state[2]),
+            self.k_y * (u_y - state[3]),
+            d_x, d_y,
+        )
+
 
 class HorizontalGameTrackingDynamics(hj.ControlAndDisturbanceAffineDynamics):
     """6D horizontal tracking dynamics (reversed: ctrl min, dstb max)."""

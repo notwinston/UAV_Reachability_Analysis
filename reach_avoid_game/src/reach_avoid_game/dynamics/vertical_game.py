@@ -80,3 +80,18 @@ class VerticalGameDynamics(hj.ControlAndDisturbanceAffineDynamics):
     def dynamics_numpy(self, state, u_z, d_z):
         """State derivatives (NumPy)."""
         return (state[1], self.k_z * (u_z - state[1]), d_z)
+
+    # --- odp.dynamics.VerticalGame3D-compatible interface ---
+
+    def optCtrl_inPython(self, state, spat_deriv):
+        """Optimal defender control (odp-style scalar). u_z = U_Dz * sign(dV/dv_Dz * k_z)."""
+        coeff = spat_deriv[1] * self.k_z
+        return float(self.u_d_z if coeff >= 0 else -self.u_d_z)
+
+    def optDstb_inPython(self, state, spat_deriv):
+        """Optimal attacker disturbance (odp-style scalar). d_z = -U_Az * sign(dV/dz_A)."""
+        return float(-self.u_a_z if spat_deriv[2] >= 0 else self.u_a_z)
+
+    def dynamics_inPython(self, state, u_z, d_z):
+        """State derivatives (pure Python tuple)."""
+        return (state[1], self.k_z * (u_z - state[1]), d_z)
