@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import numpy as np; d = np.load\\(''data/value_functions/phi_z.npz'', allow_pickle=True\\); print\\(''phi_z shape:'', d[''values''].shape\\); print\\(''phi_z grid_min:'', d[''grid_min'']\\); print\\(''phi_z grid_max:'', d[''grid_max'']\\); print\\(''phi_z <=0 fraction:'', \\(d[''values'']<=0\\).mean\\(\\)\\); print\\(\\); d2 = np.load\\(''data/value_functions/phi_h.npz'', allow_pickle=True\\); print\\(''phi_h shape:'', d2[''values''].shape\\); print\\(''phi_h <=0 fraction:'', \\(d2[''values'']<=0\\).mean\\(\\)\\); print\\(\\); d3 = np.load\\(''data/value_functions/B_z.npz'', allow_pickle=True\\); print\\(''B_z shape:'', d3[''values''].shape, ''nonzero frac:'', d3[''values''].mean\\(\\)\\)\")",
+      "Bash(colcon build:*)",
+      "Bash(source /opt/ros/humble/setup.bash)",
+      "Bash(pip install:*)",
+      "Bash(python3 reach_avoid_game/scripts/compute_vertical.py --output-dir data/value_functions --preset dev)",
+      "Bash(python3 reach_avoid_game/scripts/compute_horizontal.py --output-dir data/value_functions --preset dev)",
+      "Bash(python3 -c \":*)"
+    ]
+  }
+}
