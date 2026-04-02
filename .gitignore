@@ -12,6 +12,12 @@ build/
 .venv/
 venv/
 
+.uav/
+custom_commands.md
+cache/
+
+.devcontainer/
+
 # ROS2
 install/
 log/
