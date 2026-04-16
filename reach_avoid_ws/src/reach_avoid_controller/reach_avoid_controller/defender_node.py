@@ -205,7 +205,9 @@ class DefenderControlLogic:
 
         Modes:
         1. Outside winning region: PID pursuit toward attacker
-        2. In winning region, NOT in B_z: optimal reaching from phi_z gradient
+        2. In winning region, NOT in B_z: reaching toward B_z using V_z_inf gradient
+           (phi_z gradient is used when informative; V_z_inf gradient is the
+           fallback since it directly measures distance from B_z)
         3. In B_z, near boundary: optimal tracking from V_z_inf gradient
         4. Deep in B_z: PID tracking
 
@@ -216,6 +218,7 @@ class DefenderControlLogic:
             return self._pid_vertical(z_D, z_A), "pid_fallback"
 
         # First check: are we in the defender's winning region?
+        # Paper Eq. 27a: W_{D,z} = {Phi_z <= 0}
         in_winning = False
         if "phi_z" in self.loader.loaded_names:
             phi_z_val = self.loader.get_value("phi_z", vertical_state)
@@ -227,9 +230,15 @@ class DefenderControlLogic:
         in_B_z = b_z_val > 0.5
 
         if not in_B_z:
-            if in_winning and "phi_z" in self.loader.loaded_names:
-                # Mode 2: In winning region, optimal reaching from phi_z gradient
-                return self._optimal_reaching_vertical(vertical_state), "reaching"
+            if in_winning:
+                # Mode 2: In winning region but not in B_z — steer toward B_z.
+                # Use V_z_inf gradient (minimizes max separation = steers toward B_z).
+                # This is more robust than phi_z gradient which can be flat when
+                # the entire domain is in W_D_z (BRT covers all states).
+                if "V_z_inf" in self.loader.loaded_names:
+                    return self._optimal_tracking_vertical(bz_state), "reaching_via_Vzinf"
+                elif "phi_z" in self.loader.loaded_names:
+                    return self._optimal_reaching_vertical(vertical_state), "reaching"
             # Outside winning region or no VF: PID pursuit
             return self._pid_vertical(z_D, z_A), "pid_pursuit"
 
@@ -249,12 +258,18 @@ class DefenderControlLogic:
     def _optimal_reaching_vertical(self, vertical_state: np.ndarray) -> float:
         """Extract optimal vertical reaching control from phi_z gradient.
 
-        Defender maximizes phi_z: u_z = U_D_z * sign(dPhi_z/dv_Dz * k_z)
+        Paper Eq. 26a: Defender MINIMIZES phi_z: u_z = -U_D_z * sign(dPhi_z/dv_Dz * k_z)
+        Falls back to PID if gradient is near-zero (flat value function).
         """
         grad = self.loader.get_gradient("phi_z", vertical_state)
         # v_D_z is at index 1 in [z_D, v_D_z, z_A]
         direction = grad[1] * self.k_z
-        return self.U_D_z if direction >= 0 else -self.U_D_z
+        if abs(direction) < 1e-8:
+            # phi_z gradient is uninformative (flat VF), fall back to PID
+            z_D = vertical_state[0]
+            z_A = vertical_state[2]
+            return self._pid_vertical(z_D, z_A)
+        return -self.U_D_z if direction >= 0 else self.U_D_z
 
     def _optimal_tracking_vertical(self, bz_state: np.ndarray) -> float:
         """Extract optimal vertical tracking control from V_z_inf gradient.
@@ -302,10 +317,11 @@ class DefenderControlLogic:
             return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_fallback"
 
         # First check: are we in the defender's winning region?
+        # Paper Eq. 22b: W_{D,h} = {Phi_h > 0}
         in_winning = False
         if "phi_h" in self.loader.loaded_names:
             phi_h_val = self.loader.get_value("phi_h", horizontal_state)
-            in_winning = phi_h_val <= 0
+            in_winning = phi_h_val > 0
 
         # B_h is in relative coords: [x_rel, y_rel, vx_D, vy_D]
         bh_state = np.array([x_rel, y_rel, vx_D, vy_D])
@@ -340,11 +356,22 @@ class DefenderControlLogic:
         v_D_x_dot = k_x * (u_x - v_D_x)
         So: u_x = U_D_h * sign(dPhi_h/dv_Dx * k_x)
         u_y = U_D_h * sign(dPhi_h/dv_Dy * k_y)
+
+        Falls back to PID pursuit when gradient magnitude is too small
+        (unreliable due to coarse grid resolution).
         """
         grad = self.loader.get_gradient("phi_h", horizontal_state)
         # v_D_x at index 2, v_D_y at index 3
         dir_x = grad[2] * self.k_x
         dir_y = grad[3] * self.k_y
+
+        # Check if velocity-component gradient is informative
+        grad_vel_mag = math.sqrt(dir_x**2 + dir_y**2)
+        if grad_vel_mag < 0.01:
+            # Gradient too small — fall back to PID pursuit
+            x_D, y_D = horizontal_state[0], horizontal_state[1]
+            x_A, y_A = horizontal_state[4], horizontal_state[5]
+            return self._pid_horizontal(x_D, y_D, x_A, y_A)
 
         u_x = self.U_D_h if dir_x >= 0 else -self.U_D_h
         u_y = self.U_D_h if dir_y >= 0 else -self.U_D_h
@@ -403,13 +430,15 @@ class DefenderControlLogic:
             return status
 
         # Check winning regions if value functions available
+        # Paper Eq. 27a: W_{D,z} = {Phi_z <= 0}
         if "phi_z" in self.loader.loaded_names:
             phi_z_val = self.loader.get_value("phi_z", vertical_state)
             status["in_W_D_z"] = phi_z_val <= 0
 
+        # Paper Eq. 22b: W_{D,h} = {Phi_h > 0}
         if "phi_h" in self.loader.loaded_names:
             phi_h_val = self.loader.get_value("phi_h", horizontal_state)
-            status["in_W_D_h"] = phi_h_val <= 0
+            status["in_W_D_h"] = phi_h_val > 0
 
         # Determine overall game status string
         in_w_d_z = status.get("in_W_D_z", False)

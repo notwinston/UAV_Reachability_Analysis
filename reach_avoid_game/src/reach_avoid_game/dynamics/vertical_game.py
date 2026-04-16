@@ -6,9 +6,9 @@ Dynamics (Eq. 25 in paper):
   v_D_z_dot = k_z * (u_z - v_D_z)
   z_A_dot   = d_z
 
-Two-player game:
-  - Defender (control) maximizes value (tries to capture)
-  - Attacker (disturbance) minimizes value (tries to escape)
+Two-player game (Paper Eq. 25-26 — roles REVERSED vs horizontal game):
+  - Defender (control) MINIMIZES value (tries to reach capture set)
+  - Attacker (disturbance) MAXIMIZES value (tries to escape capture)
 """
 
 from __future__ import annotations
@@ -32,9 +32,12 @@ class VerticalGameDynamics(hj.ControlAndDisturbanceAffineDynamics):
         self.u_d_z = config.defender.max_speed_vertical
         self.u_a_z = config.attacker.max_speed_vertical
 
+        # Paper Eq. 25-26: defender MINIMIZES, attacker MAXIMIZES
+        # This is reversed from the horizontal game because the defender
+        # wants to REACH the capture set (minimize distance).
         super().__init__(
-            control_mode="max",
-            disturbance_mode="min",
+            control_mode="min",
+            disturbance_mode="max",
             control_space=hj.sets.Box(
                 lo=jnp.array([-self.u_d_z]),
                 hi=jnp.array([self.u_d_z]),
@@ -69,13 +72,13 @@ class VerticalGameDynamics(hj.ControlAndDisturbanceAffineDynamics):
     # --- OptimizedDP-compatible pure-Python methods (for online control) ---
 
     def opt_ctrl_numpy(self, state, spat_deriv):
-        """Optimal control (NumPy). u_z = U_D_z * sign(dV/dv_Dz * k_z)."""
+        """Optimal control (NumPy). Defender MINIMIZES: u_z = -U_D_z * sign(dV/dv_Dz * k_z)."""
         coeff = spat_deriv[1] * self.k_z
-        return np.where(coeff >= 0, self.u_d_z, -self.u_d_z)
+        return np.where(coeff >= 0, -self.u_d_z, self.u_d_z)
 
     def opt_dstb_numpy(self, state, spat_deriv):
-        """Optimal disturbance (NumPy). d_z = -U_A_z * sign(dV/dz_A)."""
-        return np.where(spat_deriv[2] >= 0, -self.u_a_z, self.u_a_z)
+        """Optimal disturbance (NumPy). Attacker MAXIMIZES: d_z = U_A_z * sign(dV/dz_A)."""
+        return np.where(spat_deriv[2] >= 0, self.u_a_z, -self.u_a_z)
 
     def dynamics_numpy(self, state, u_z, d_z):
         """State derivatives (NumPy)."""
@@ -84,13 +87,13 @@ class VerticalGameDynamics(hj.ControlAndDisturbanceAffineDynamics):
     # --- odp.dynamics.VerticalGame3D-compatible interface ---
 
     def optCtrl_inPython(self, state, spat_deriv):
-        """Optimal defender control (odp-style scalar). u_z = U_Dz * sign(dV/dv_Dz * k_z)."""
+        """Optimal defender control (odp-style scalar). Defender MINIMIZES: u_z = -U_Dz * sign(dV/dv_Dz * k_z)."""
         coeff = spat_deriv[1] * self.k_z
-        return float(self.u_d_z if coeff >= 0 else -self.u_d_z)
+        return float(-self.u_d_z if coeff >= 0 else self.u_d_z)
 
     def optDstb_inPython(self, state, spat_deriv):
-        """Optimal attacker disturbance (odp-style scalar). d_z = -U_Az * sign(dV/dz_A)."""
-        return float(-self.u_a_z if spat_deriv[2] >= 0 else self.u_a_z)
+        """Optimal attacker disturbance (odp-style scalar). Attacker MAXIMIZES: d_z = U_Az * sign(dV/dz_A)."""
+        return float(self.u_a_z if spat_deriv[2] >= 0 else -self.u_a_z)
 
     def dynamics_inPython(self, state, u_z, d_z):
         """State derivatives (pure Python tuple)."""

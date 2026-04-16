@@ -29,11 +29,11 @@ from reach_avoid_game.solvers.grid_utils import (
 from reach_avoid_game.solvers.value_function_io import ValueFunctionData, save_value_function
 
 
-def _make_horizontal_capture_set(grid: Grid, d_h: float) -> np.ndarray:
+def _make_horizontal_capture_sdf(grid: Grid, d_h: float) -> np.ndarray:
     """Create capture set SDF for the 6D horizontal game.
 
     Capture: sqrt((x_A - x_D)^2 + (y_A - y_D)^2) <= d_h
-    SDF: l(x) = sqrt((x_A - x_D)^2 + (y_A - y_D)^2) - d_h
+    SDF: negative inside capture, positive outside.
     """
     shape = tuple(grid.pts_each_dim)
     ones = np.ones(shape)
@@ -43,6 +43,87 @@ def _make_horizontal_capture_set(grid: Grid, d_h: float) -> np.ndarray:
     y_a = grid.vs[5] * ones
     dist = np.sqrt((x_a - x_d)**2 + (y_a - y_d)**2)
     return dist - d_h
+
+
+def _make_attacker_target_sdf(grid: Grid, config: GameConfig) -> np.ndarray:
+    """Create target region SDF for the attacker position in 6D grid.
+
+    Paper Eq. 20a: R_h includes {x_A^h in T}.
+    Uses grid indices 4 (x_A) and 5 (y_A).
+    SDF: negative inside target T, positive outside.
+    """
+    tr = config.target_region
+    shape = tuple(grid.pts_each_dim)
+    ones = np.ones(shape)
+    x_a = grid.vs[4] * ones
+    y_a = grid.vs[5] * ones
+
+    # Box SDF: negative inside, positive outside
+    target_sdf = np.maximum(
+        np.maximum(tr.x_min - x_a, x_a - tr.x_max),
+        np.maximum(tr.y_min - y_a, y_a - tr.y_max),
+    )
+    return target_sdf
+
+
+def _make_reach_set(grid: Grid, config: GameConfig) -> np.ndarray:
+    """Create the reach set l(x) for the horizontal game (Paper Eq. 20a).
+
+    R_h = {x^h | x_A^h in T} union {x^h | p_D^h in Omega_obs}
+
+    l(x) = min(l_T(x_A), l_D_obs(p_D))
+    Negative when attacker is in target OR defender is in obstacles.
+    """
+    # l_T: attacker in target region (negative inside T)
+    l_T = _make_attacker_target_sdf(grid, config)
+
+    # l_D_obs: defender in obstacles (negative inside obstacles/walls)
+    l_D_obs = _make_obstacle_avoid_set(grid, config)
+
+    # Union = min of signed distances
+    return np.minimum(l_T, l_D_obs)
+
+
+def _make_avoid_set(grid: Grid, config: GameConfig, d_h: float) -> np.ndarray:
+    """Create the avoid set constraint for the horizontal game (Paper Eq. 20b, Eq. 7).
+
+    A_h = {x^h | ||x_A^h - x_D^h|| <= d_h AND x_A^h not in T}
+          union {x^h | x_A^h in Omega_obs}
+
+    Returns constraint function that is POSITIVE in the avoid region.
+    This is passed directly as the 'obs' argument to the reach-avoid solver.
+
+    Construction (Paper Eq. 7 adapted to horizontal):
+      g_capture = ||x_A - x_D|| - d_h   (negative when captured)
+      g_inT = -S(x_A, T)                (positive when IN target T)
+      g_A_obs = S(x_A, Omega_obs)        (negative when in obstacle)
+
+      obs = -min(max(g_capture, g_inT), g_A_obs)
+      Positive when in avoid set A_h.
+    """
+    shape = tuple(grid.pts_each_dim)
+    ones = np.ones(shape)
+
+    # g_capture: negative when horizontally captured
+    x_d = grid.vs[0] * ones
+    y_d = grid.vs[1] * ones
+    x_a = grid.vs[4] * ones
+    y_a = grid.vs[5] * ones
+    dist = np.sqrt((x_a - x_d)**2 + (y_a - y_d)**2)
+    g_capture = dist - d_h
+
+    # g_inT: positive when attacker IS in target T
+    # S(x_A, T) is negative inside T, so -S is positive inside T
+    attacker_target_sdf = _make_attacker_target_sdf(grid, config)
+    g_inT = -attacker_target_sdf
+
+    # g_A_obs: attacker obstacle SDF (negative inside obstacle)
+    g_A_obs = _make_attacker_obstacle_avoid_set(grid, config)
+
+    # Paper Eq. 7: obs = -min(max(g_capture, g_inT), g_A_obs)
+    inner_max = np.maximum(g_capture, g_inT)
+    combined = np.minimum(inner_max, g_A_obs)
+    return -combined
 
 
 def _make_wall_avoid_set(grid: Grid, config: GameConfig, margin: float = 0.5) -> np.ndarray:
@@ -142,7 +223,13 @@ def _make_obstacle_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray:
 def _make_avoid_set_with_Bh(
     grid: Grid, config: GameConfig, v_h_t_data: ValueFunctionData, d_h: float,
 ) -> np.ndarray:
-    """Create avoid set combining obstacles and complement(B_h) (Paper Eq. 39)."""
+    """Create avoid set using B_h instead of simple capture (Paper Eq. 39).
+
+    A_h = {x^h | x_h^rel in B_h AND x_A^h not in T} union {x_A in Omega_obs}
+
+    Returns constraint positive in avoid region, same convention as _make_avoid_set.
+    Uses V_h_T <= d_h as the B_h membership criterion instead of ||x_A-x_D|| <= d_h.
+    """
     ndim_vht = v_h_t_data.values.ndim
     axes = []
     for i in range(ndim_vht):
@@ -155,7 +242,7 @@ def _make_avoid_set_with_Bh(
         v_h_t_data.values,
         method="linear",
         bounds_error=False,
-        fill_value=-100.0,
+        fill_value=100.0,
     )
 
     v_min = float(v_h_t_data.values.min())
@@ -189,14 +276,21 @@ def _make_avoid_set_with_Bh(
 
     v_h_t_values = v_h_t_values.reshape(shape)
 
-    # l_Bh_complement = d_h_effective - V_h_T
-    # Negative outside B_h (avoid), positive inside (safe)
-    l_bh_complement = d_h_effective - v_h_t_values
+    # g_Bh_capture: negative when inside B_h (V_h_T <= d_h_effective)
+    # This replaces g_capture = ||x_A-x_D|| - d_h with the invariant set condition
+    g_bh_capture = v_h_t_values - d_h_effective
 
-    obstacle_values = _make_obstacle_avoid_set(grid, config)
-    combined = np.minimum(np.asarray(obstacle_values), l_bh_complement)
+    # g_inT: positive when attacker IS in target T
+    attacker_target_sdf = _make_attacker_target_sdf(grid, config)
+    g_inT = -attacker_target_sdf
 
-    return combined
+    # g_A_obs: attacker obstacle SDF (negative inside obstacle)
+    g_A_obs = _make_attacker_obstacle_avoid_set(grid, config)
+
+    # Paper Eq. 7 adapted with B_h: obs = -min(max(g_bh_capture, g_inT), g_A_obs)
+    inner_max = np.maximum(g_bh_capture, g_inT)
+    combined = np.minimum(inner_max, g_A_obs)
+    return -combined
 
 
 def solve_horizontal_reach_avoid(
@@ -218,20 +312,20 @@ def solve_horizontal_reach_avoid(
     grid = create_horizontal_game_grid(config)
     dynamics = HorizontalGameDynamics(config)
 
-    # Target: capture set
-    target_values = _make_horizontal_capture_set(grid, config.capture.d_h)
+    # Paper Eq. 20a: Reach set (target for BRT)
+    # R_h = {x_A in T} union {p_D in Omega_obs}
+    # l(x) = min(S(x_A, T), S(p_D, Omega_obs))
+    reach_set_values = _make_reach_set(grid, config)
 
-    # Avoid set
+    # Paper Eq. 20b/Eq. 7: Avoid set (constraint)
+    # A_h = {capture outside T} union {x_A in Omega_obs}
+    # Positive in avoid region
     if v_h_t_data is not None:
-        obstacle_values = _make_avoid_set_with_Bh(grid, config, v_h_t_data, config.capture.d_h)
+        avoid_set_values = _make_avoid_set_with_Bh(grid, config, v_h_t_data, config.capture.d_h)
         print("  Using B_h feedback in avoid set per Paper Eq. 39")
     else:
-        obstacle_values = _make_obstacle_avoid_set(grid, config)
-
-    # Add attacker wall/obstacle avoidance per Paper Eq. 20b: {x_A^h in Omega_obs}
-    attacker_obstacles = _make_attacker_obstacle_avoid_set(grid, config)
-    obstacle_values = np.minimum(obstacle_values, attacker_obstacles)
-    print("  Added attacker wall/obstacle avoidance per Paper Eq. 20b")
+        avoid_set_values = _make_avoid_set(grid, config, config.capture.d_h)
+        print("  Using standard avoid set per Paper Eq. 20b")
 
     # Time horizon
     T = 10.0 if preset == "dev" else 22.0
@@ -242,13 +336,15 @@ def solve_horizontal_reach_avoid(
     print(f"Solving horizontal reach-avoid game (6D grid: {tuple(grid.pts_each_dim)})...")
     print(f"  Time horizon: T={T}s, steps: {n_steps}")
 
-    # Reach-avoid: use target and obstacle (walls + obstacles always present)
+    # Reach-avoid BRT: attacker minimizes (reach target), defender maximizes (prevent)
+    # Paper Eq. 10: max(min{dPhi/dt + H, l - Phi}, g - Phi) = 0
+    # Postprocessor: max(min(v, l), obs) where obs = avoid_set_values (positive in avoid)
     compMethod = {
         "TargetSetMode": "minVWithV0",
         "ObstacleSetMode": "maxVWithObstacle",
     }
     result = HJSolver(
-        dynamics, grid, [target_values, -obstacle_values],
+        dynamics, grid, [reach_set_values, avoid_set_values],
         tau, compMethod, accuracy="low",
     )
 
@@ -267,8 +363,9 @@ def solve_horizontal_reach_avoid(
             "U_D_h": config.defender.max_speed_horizontal,
             "U_A_h": config.attacker.max_speed_horizontal,
             "time_horizon": float(T),
+            # Paper Eq. 22: W_A,h = {Phi_h <= 0}, W_D,h = {Phi_h > 0}
         },
-        description="Horizontal reach-avoid value function Phi_h (6D)",
+        description="Horizontal reach-avoid value function Phi_h (6D). Defender wins when Phi_h > 0.",
     )
     save_value_function(output_path, vf_data)
     print(f"Saved phi_h to {output_path}, shape: {phi_h.shape}")

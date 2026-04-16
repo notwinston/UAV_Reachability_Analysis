@@ -13,6 +13,7 @@ def main(args=None):
         from rclpy.node import Node
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
         from geometry_msgs.msg import Twist
+        from std_msgs.msg import String
         from px4_msgs.msg import (
             OffboardControlMode,
             TrajectorySetpoint,
@@ -82,21 +83,27 @@ def main(args=None):
                     VehicleCommand, f'{fmu_prefix}fmu/in/vehicle_command', qos_cmd
                 )
 
+                self.declare_parameter('takeoff_altitude', 10.0)
+                self._takeoff_altitude = self.get_parameter('takeoff_altitude').value
+
                 # State
                 self._cmd_vel = Twist()
                 self._offboard_setpoint_count = 0
-                # In SITL, offboard mode and arm commands work reliably once DDS is live.
-                # We assume success after a small number of sent commands rather than
-                # waiting for VehicleStatus (which has a payload-size mismatch in this setup).
-                self._offboard_sent = 0   # count of DO_SET_MODE commands sent
-                self._arm_sent = 0        # count of arm commands sent
-                self._armed = False       # set True after arm commands are sent
-                self._offboard_engaged = False  # set True after offboard commands sent
+                self._offboard_sent = 0
+                self._arm_sent = 0
+                self._armed = False
+                self._offboard_engaged = False
                 self._px4_connected = False
                 self._last_cmd_time = 0.0
                 self._startup_count = 0
-                # Takeoff is skipped: drones spawn at their operating altitude in Gazebo.
-                self._takeoff_done = True
+                self._takeoff_done = False
+                self._local_z = 0.0  # NED z (negative = up)
+                self._killed = False  # motor kill state
+
+                # Subscribe to game status for capture detection
+                self.create_subscription(
+                    String, '/game/status', self._game_status_callback, 10
+                )
 
                 # 20Hz heartbeat timer (offboard mode requires continuous commands)
                 self._timer = self.create_timer(0.05, self._timer_callback)
@@ -110,14 +117,29 @@ def main(args=None):
                 """Store latest velocity command."""
                 self._cmd_vel = msg
 
+            def _game_status_callback(self, msg: String):
+                """On CAPTURED, kill motors so drones drop."""
+                if not self._killed and 'CAPTURED' in msg.data:
+                    self._killed = True
+                    self.get_logger().info('CAPTURED detected — killing motors!')
+                    self._disarm()
+
             def _local_pos_callback(self, msg: VehicleLocalPosition):
-                """Detect PX4 DDS connection from local position heartbeat."""
+                """Track altitude and detect DDS connection."""
+                self._local_z = float(msg.z)  # NED z (negative = above home)
                 if not self._px4_connected:
                     self._px4_connected = True
                     self.get_logger().info('PX4 DDS connection established')
 
             def _timer_callback(self):
                 """20Hz heartbeat: publish offboard mode and velocity setpoints."""
+                if self._killed:
+                    # Send disarm a few times then stop
+                    self._kill_count = getattr(self, '_kill_count', 0) + 1
+                    if self._kill_count <= 10:
+                        self._disarm()
+                    return
+
                 # Always publish offboard control mode to maintain heartbeat
                 self._publish_offboard_control_mode()
 
@@ -183,9 +205,22 @@ def main(args=None):
                 """
                 msg = TrajectorySetpoint()
 
-                if self._armed:
+                if self._armed and not self._takeoff_done:
+                    # Takeoff phase: climb to operating altitude at 3 m/s
+                    # NED z is negative above home; target is -takeoff_altitude
+                    alt_above_home = -self._local_z  # positive = meters above home
+                    if alt_above_home >= self._takeoff_altitude - 0.5:
+                        self._takeoff_done = True
+                        self.get_logger().info(
+                            f'Takeoff complete at {alt_above_home:.1f}m, '
+                            f'forwarding game commands')
+                    else:
+                        # Climb at 3 m/s (NED z velocity = -3.0)
+                        msg.velocity[0] = 0.0
+                        msg.velocity[1] = 0.0
+                        msg.velocity[2] = -3.0
+                elif self._armed:
                     # Forward cmd_vel from game controller (ENU -> NED conversion)
-                    # Clamp to game speed limits: U_D_h=6.0 m/s, U_D_z=4.0 m/s
                     max_h = 6.0
                     max_v = 4.0
                     vx = max(-max_h, min(max_h, self._cmd_vel.linear.x))
@@ -236,6 +271,15 @@ def main(args=None):
                     param2=21196.0,  # Force arm magic number
                 )
                 self.get_logger().info('Force arm command sent')
+
+            def _disarm(self):
+                """Force-disarm (kill motors immediately)."""
+                self._publish_vehicle_command(
+                    VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                    param1=0.0,
+                    param2=21196.0,  # Force disarm magic number
+                )
+                self.get_logger().info('Force disarm (motor kill) sent')
 
             def _engage_offboard_mode(self):
                 """Send offboard mode command."""

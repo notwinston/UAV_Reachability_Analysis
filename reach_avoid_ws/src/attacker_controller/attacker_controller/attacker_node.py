@@ -299,8 +299,9 @@ def main(args=None):
                     grad_xa = h_grad[4]
                     grad_ya = h_grad[5]
 
-                    if abs(grad_xa) < 1e-10 and abs(grad_ya) < 1e-10:
-                        # Near-zero gradient: goal-seeking fallback
+                    grad_a_mag = math.sqrt(grad_xa**2 + grad_ya**2)
+                    if grad_a_mag < 0.01:
+                        # Gradient too small (coarse grid) — goal-seeking fallback
                         dx = self._target_center[0] - x_A
                         dy = self._target_center[1] - y_A
                         dist_h = math.sqrt(dx * dx + dy * dy)
@@ -315,16 +316,20 @@ def main(args=None):
                     # 3D state: [z_D, v_D_z, z_A]
                     v_state = np.array([z_D, vz_D, z_A])
                     v_grad = self._vf_loader.get_gradient('phi_z', v_state)
-                    # Attacker minimizes: index 2 (z_A)
+                    # Paper Eq. 26b: Attacker MAXIMIZES: d_z = U_A_z * sign(dPhi_z/dz_A)
                     grad_za = v_grad[2]
 
-                    if abs(grad_za) < 1e-10:
-                        # Near-zero gradient: hold target altitude
+                    # Use gradient magnitude threshold relative to grid spacing.
+                    # When phi_z is flat (entire domain in W_D_z), gradients are
+                    # numerical noise — fall back to target altitude seeking.
+                    grad_z_mag = np.sqrt(v_grad[0]**2 + v_grad[1]**2 + v_grad[2]**2)
+                    if grad_z_mag < 0.01:
+                        # phi_z is flat: hold target altitude
                         target_alt = self.get_parameter('target_altitude').value
                         dz = target_alt - z_A
                         cmd.linear.z = max(-self._U_A_z, min(self._U_A_z, 2.0 * dz))
                     else:
-                        cmd.linear.z = -self._U_A_z if grad_za >= 0 else self._U_A_z
+                        cmd.linear.z = self._U_A_z if grad_za >= 0 else -self._U_A_z
 
                 except Exception as e:
                     self.get_logger().warn(

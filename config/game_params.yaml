@@ -29,7 +29,7 @@ obstacles:
     x_max: 20.0
     y_min: 5.0
     y_max: 20.0
-grid_preset: dev
+grid_preset: medium
 grid:
   vertical:
     z_rel_points: 81

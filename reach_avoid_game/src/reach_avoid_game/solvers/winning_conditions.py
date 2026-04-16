@@ -182,13 +182,13 @@ def check_defender_wins(
         - T_goal: float (if phi_a_reach provided)
         - T_capture: float (if phi_a_reach provided)
     """
-    # Check horizontal winning region
+    # Check horizontal winning region — Paper Eq. 22b: W_{D,h} = {Phi_h > 0}
     phi_h_val = interpolate_value(phi_h, state_h)
-    in_w_d_h = phi_h_val <= 0  # Defender can capture horizontally
+    in_w_d_h = phi_h_val > 0
 
-    # Check vertical winning region
+    # Check vertical winning region — Paper Eq. 27a: W_{D,z} = {Phi_z <= 0}
     phi_z_val = interpolate_value(phi_z, state_z)
-    in_w_d_z = phi_z_val <= 0  # Defender can capture vertically
+    in_w_d_z = phi_z_val <= 0
 
     # Check vertical invariant set
     z_rel = state_z[0] - state_z[2]  # z_D - z_A
@@ -236,14 +236,17 @@ def check_defender_wins(
 
 def get_winning_regions(
     phi_data: ValueFunctionData,
+    is_vertical: bool = False,
 ) -> dict:
     """Extract winning regions from a value function.
 
-    W_D (defender wins) = {x : phi(x) <= 0}  (can capture from here)
-    W_A (attacker wins) = {x : phi(x) > 0}   (attacker escapes from here)
+    Convention depends on the sub-game:
+    - Horizontal (Paper Eq. 22): W_D,h = {Phi_h > 0}, W_A,h = {Phi_h <= 0}
+    - Vertical (Paper Eq. 27):   W_D,z = {Phi_z <= 0}, W_A,z = {Phi_z > 0}
 
     Args:
         phi_data: Value function data (phi_h or phi_z)
+        is_vertical: True for vertical game (defender wins at <= 0)
 
     Returns:
         Dictionary with:
@@ -252,8 +255,12 @@ def get_winning_regions(
         - W_D_fraction: fraction of grid in W_D
         - W_A_fraction: fraction of grid in W_A
     """
-    w_d_mask = phi_data.values <= 0
-    w_a_mask = phi_data.values > 0
+    if is_vertical:
+        w_d_mask = phi_data.values <= 0
+        w_a_mask = phi_data.values > 0
+    else:
+        w_d_mask = phi_data.values > 0
+        w_a_mask = phi_data.values <= 0
 
     return {
         "W_D_mask": w_d_mask,

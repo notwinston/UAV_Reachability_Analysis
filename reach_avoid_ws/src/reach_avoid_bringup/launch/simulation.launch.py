@@ -218,6 +218,11 @@ def generate_launch_description():
                         additional_env=defender_env,
                         output='screen',
                     ),
+                ],
+            ),
+            TimerAction(
+                period=12.0,
+                actions=[
                     ExecuteProcess(
                         cmd=[px4_bin, '-i', '2'],
                         cwd=px4_dir,
@@ -238,6 +243,7 @@ def generate_launch_description():
             'vehicle_id': 1,
             'cmd_vel_topic': '/defender/cmd_vel',
             'fmu_topic_prefix': 'defender',
+            'takeoff_altitude': 10.0,
         }],
         output='screen',
     )
@@ -250,6 +256,7 @@ def generate_launch_description():
             'vehicle_id': 2,
             'cmd_vel_topic': '/attacker/cmd_vel',
             'fmu_topic_prefix': 'attacker',
+            'takeoff_altitude': 10.0,
         }],
         output='screen',
     )
@@ -279,9 +286,10 @@ def generate_launch_description():
     ]
 
     vf_default = _find_path([
+        '/workspaces/UAV_Reachability_Analysis/data/value_functions',
         os.path.join(os.path.expanduser('~'), 'ws', 'data', 'value_functions'),
         '/workspace/data/value_functions',
-    ], '/workspace/data/value_functions')
+    ], '/workspaces/UAV_Reachability_Analysis/data/value_functions')
 
     attacker_controller = Node(
         package='attacker_controller',
@@ -301,16 +309,32 @@ def generate_launch_description():
         output='screen',
     )
 
+    defender_controller = Node(
+        package='reach_avoid_controller',
+        executable='defender_node',
+        name='defender_controller',
+        parameters=[{
+            'value_function_dir': vf_default,
+            'control_rate': 50.0,
+            'pid_gain_z': 2.0,
+            'pid_gain_h': 2.0,
+            'margin_z_factor': 0.3,
+            'margin_h_factor': 0.3,
+        }],
+        output='screen',
+    )
+
     # Delay px4_adapter, ground_truth_relay, attacker_controller until after PX4 has
-    # spawned (6s) and EKF2 has received sensor data and converged (~12s more).
+    # spawned (defender at 6s, attacker at 12s) and EKF2 has converged (~12s more).
     # Arm before EKF2 ready causes "ekf2 missing data" / "heading estimate invalid".
     delayed_controllers = TimerAction(
-        period=18.0,
+        period=30.0,
         actions=[
             px4_adapter_defender,
             px4_adapter_attacker,
             ground_truth_relay,
             attacker_controller,
+            defender_controller,
         ],
     )
 
@@ -338,7 +362,7 @@ def generate_launch_description():
         cleanup,
         gazebo,
         gz_bridge,
-        TimerAction(period=1.0, actions=[xrce_dds_agent]),  # brief delay after cleanup
+        TimerAction(period=3.0, actions=[xrce_dds_agent]),  # after cleanup (1.5s) + margin
         px4_processes,
         delayed_controllers,
     ])
