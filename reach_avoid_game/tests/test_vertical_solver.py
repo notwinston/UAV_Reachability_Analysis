@@ -1,7 +1,11 @@
 """Tests for the vertical sub-game solver and control extraction."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
+
+pytest.importorskip("odp")
 
 from reach_avoid_game.config import GameConfig
 from reach_avoid_game.solvers.value_function_io import load_value_function, load_time_slices
@@ -18,28 +22,37 @@ from reach_avoid_game.solvers.control_extraction import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_PATH = REPO_ROOT / "config" / "game_params.yaml"
+
+
 @pytest.fixture(scope="module")
 def config():
-    return GameConfig.from_yaml("/workspace/config/game_params.yaml")
+    return GameConfig.from_yaml(CONFIG_PATH)
 
 
 @pytest.fixture(scope="module")
-def v_z_inf_path(config):
+def output_dir(tmp_path_factory):
+    return tmp_path_factory.mktemp("vertical_value_functions")
+
+
+@pytest.fixture(scope="module")
+def v_z_inf_path(config, output_dir):
     """Compute V_z_inf on dev grid (cached for module). Step 1 of pipeline."""
-    return solve_vertical_max_distance(config)
+    return solve_vertical_max_distance(config, output_dir=output_dir)
 
 
 @pytest.fixture(scope="module")
-def b_z_path(v_z_inf_path, config):
+def b_z_path(v_z_inf_path, config, output_dir):
     """Compute B_z from V_z_inf (cached for module). Step 2 of pipeline."""
-    return compute_invariant_set_Bz(v_z_inf_path, d_z=config.capture.d_z)
+    return compute_invariant_set_Bz(v_z_inf_path, d_z=config.capture.d_z, output_dir=output_dir)
 
 
 @pytest.fixture(scope="module")
-def phi_z_path(config, v_z_inf_path):
+def phi_z_path(config, v_z_inf_path, output_dir):
     """Compute phi_z with B_z feedback on dev grid (cached for module). Step 3 of pipeline."""
     v_z_inf_data = load_value_function(v_z_inf_path)
-    return solve_vertical_reach_avoid(config, v_z_inf_data=v_z_inf_data)
+    return solve_vertical_reach_avoid(config, output_dir=output_dir, v_z_inf_data=v_z_inf_data)
 
 
 @pytest.fixture(scope="module")

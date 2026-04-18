@@ -1,6 +1,8 @@
 """Tests for horizontal sub-game dynamics."""
 
-import jax.numpy as jnp
+from pathlib import Path
+
+import numpy as np
 import pytest
 
 from reach_avoid_game.config import GameConfig
@@ -9,7 +11,8 @@ from reach_avoid_game.dynamics.horizontal_game import HorizontalGameDynamics
 
 @pytest.fixture
 def config():
-    return GameConfig.from_yaml("/workspace/config/game_params.yaml")
+    config_path = Path(__file__).resolve().parents[2] / "config" / "game_params.yaml"
+    return GameConfig.from_yaml(config_path)
 
 
 @pytest.fixture
@@ -24,9 +27,9 @@ class TestHorizontalDynamicsEquations:
         k_y = config.defender.k_y
 
         # State: [x_D, y_D, v_D_x, v_D_y, x_A, y_A]
-        state = jnp.array([10.0, 5.0, 2.0, -1.0, 20.0, 15.0])
-        control = jnp.array([3.0, 1.5])      # [u_x, u_y]
-        disturbance = jnp.array([-1.0, 2.0])  # [d_x, d_y]
+        state = np.array([10.0, 5.0, 2.0, -1.0, 20.0, 15.0])
+        control = np.array([3.0, 1.5])      # [u_x, u_y]
+        disturbance = np.array([-1.0, 2.0])  # [d_x, d_y]
 
         deriv = dynamics(state, control, disturbance, 0.0)
 
@@ -41,7 +44,7 @@ class TestHorizontalDynamicsEquations:
         """Open-loop dynamics should show only drift from velocity."""
         k_x = config.defender.k_x
         k_y = config.defender.k_y
-        state = jnp.array([10.0, 5.0, 3.0, -2.0, 20.0, 15.0])
+        state = np.array([10.0, 5.0, 3.0, -2.0, 20.0, 15.0])
 
         f = dynamics.open_loop_dynamics(state, 0.0)
 
@@ -54,9 +57,9 @@ class TestHorizontalDynamicsEquations:
 
     def test_zero_state_zero_derivatives(self, dynamics):
         """With zero velocity, zero control, zero disturbance, derivatives are zero."""
-        state = jnp.array([5.0, 5.0, 0.0, 0.0, 10.0, 10.0])
-        control = jnp.array([0.0, 0.0])
-        disturbance = jnp.array([0.0, 0.0])
+        state = np.array([5.0, 5.0, 0.0, 0.0, 10.0, 10.0])
+        control = np.array([0.0, 0.0])
+        disturbance = np.array([0.0, 0.0])
 
         deriv = dynamics(state, control, disturbance, 0.0)
 
@@ -70,9 +73,9 @@ class TestOptimalControlDirection:
 
         When dV/dv_D_x > 0, defender should choose u_x = U_D_h (max).
         """
-        state = jnp.array([5.0, 5.0, 0.0, 0.0, 20.0, 15.0])
+        state = np.array([5.0, 5.0, 0.0, 0.0, 20.0, 15.0])
         # Gradient: positive in v_D_x direction
-        grad_value = jnp.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+        grad_value = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
 
         ctrl = dynamics.optimal_control(state, 0.0, grad_value)
 
@@ -84,9 +87,9 @@ class TestOptimalControlDirection:
 
         When dV/dx_A > 0, attacker should choose d_x = -U_A_h (min).
         """
-        state = jnp.array([5.0, 5.0, 0.0, 0.0, 20.0, 15.0])
+        state = np.array([5.0, 5.0, 0.0, 0.0, 20.0, 15.0])
         # Gradient: positive in x_A direction
-        grad_value = jnp.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        grad_value = np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
 
         dstb = dynamics.optimal_disturbance(state, 0.0, grad_value)
 
@@ -119,12 +122,12 @@ class TestSpeedConstraints:
 
     def test_control_jacobian_shape(self, dynamics):
         """Control Jacobian should be 6x2."""
-        state = jnp.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         jac = dynamics.control_jacobian(state, 0.0)
         assert jac.shape == (6, 2)
 
     def test_disturbance_jacobian_shape(self, dynamics):
         """Disturbance Jacobian should be 6x2."""
-        state = jnp.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         jac = dynamics.disturbance_jacobian(state, 0.0)
         assert jac.shape == (6, 2)

@@ -1,7 +1,8 @@
 """Tests for dynamics models."""
 
+from pathlib import Path
+
 import numpy as np
-import jax.numpy as jnp
 import pytest
 
 from reach_avoid_game.config import GameConfig, DefenderConfig, AttackerConfig
@@ -10,7 +11,8 @@ from reach_avoid_game.dynamics import DefenderDynamics, AttackerDynamics, Vertic
 
 @pytest.fixture
 def config():
-    return GameConfig.from_yaml("/workspace/config/game_params.yaml")
+    config_path = Path(__file__).resolve().parents[2] / "config" / "game_params.yaml"
+    return GameConfig.from_yaml(config_path)
 
 
 @pytest.fixture
@@ -108,14 +110,18 @@ class TestAttackerDynamics:
 
 
 class TestVerticalGameDynamics:
+    def test_uses_paper_min_max_roles(self, vertical_dynamics):
+        assert vertical_dynamics.uMode == "min"
+        assert vertical_dynamics.dMode == "max"
+
     def test_state_derivatives_match_eq25(self, vertical_dynamics, config):
         """Verify 3D state derivatives match Eq. 25 from paper."""
         k_z = config.defender.k_z
 
         # State: [z_D, v_D_z, z_A]
-        state = jnp.array([5.0, 1.0, 3.0])
-        control = jnp.array([2.0])     # u_z
-        disturbance = jnp.array([1.5])  # d_z
+        state = np.array([5.0, 1.0, 3.0])
+        control = np.array([2.0])     # u_z
+        disturbance = np.array([1.5])  # d_z
 
         deriv = vertical_dynamics(state, control, disturbance, 0.0)
 
@@ -126,7 +132,7 @@ class TestVerticalGameDynamics:
     def test_open_loop_dynamics(self, vertical_dynamics, config):
         """Open-loop dynamics should show only drift."""
         k_z = config.defender.k_z
-        state = jnp.array([5.0, 2.0, 3.0])
+        state = np.array([5.0, 2.0, 3.0])
 
         f = vertical_dynamics.open_loop_dynamics(state, 0.0)
 
@@ -135,34 +141,22 @@ class TestVerticalGameDynamics:
         assert float(f[2]) == pytest.approx(0.0)           # no disturbance
 
     def test_optimal_control_direction(self, vertical_dynamics):
-        """Defender's optimal control moves toward attacker (for capture).
-
-        When grad_value wrt v_D_z is positive (increasing value with increasing v_D_z),
-        and defender maximizes value, the optimal u_z should be positive (max).
-        """
-        state = jnp.array([5.0, 0.0, 8.0])  # attacker above defender
-        # Gradient pointing in direction where increasing v_D_z increases value
-        grad_value = jnp.array([0.0, 1.0, 0.0])
+        """Defender minimizes the vertical value."""
+        state = np.array([5.0, 0.0, 8.0])  # attacker above defender
+        grad_value = np.array([0.0, 1.0, 0.0])
 
         ctrl = vertical_dynamics.optimal_control(state, 0.0, grad_value)
 
-        # Defender should choose max u_z to go up toward attacker
-        assert float(ctrl[0]) == pytest.approx(4.0)  # U_D_z
+        assert float(ctrl[0]) == pytest.approx(-4.0)  # -U_D_z
 
     def test_optimal_disturbance_direction(self, vertical_dynamics):
-        """Attacker's optimal disturbance moves away from defender.
-
-        When grad_value wrt z_A is positive, and attacker minimizes value,
-        the optimal d_z should be negative (to reduce value).
-        """
-        state = jnp.array([5.0, 0.0, 8.0])
-        # Gradient: increasing z_A increases value
-        grad_value = jnp.array([0.0, 0.0, 1.0])
+        """Attacker maximizes the vertical value."""
+        state = np.array([5.0, 0.0, 8.0])
+        grad_value = np.array([0.0, 0.0, 1.0])
 
         dstb = vertical_dynamics.optimal_disturbance(state, 0.0, grad_value)
 
-        # Attacker minimizes → should go in negative z_A direction
-        assert float(dstb[0]) == pytest.approx(-2.0)  # -U_A_z
+        assert float(dstb[0]) == pytest.approx(2.0)  # U_A_z
 
     def test_control_space_bounds(self, vertical_dynamics, config):
         """Control space should match speed limits."""

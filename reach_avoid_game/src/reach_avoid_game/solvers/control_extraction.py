@@ -83,8 +83,8 @@ def extract_optimal_control_vertical(
 ) -> float:
     """Extract optimal vertical control from value function gradient.
 
-    For the vertical game (defender maximizes):
-    u_z = U_D_z * sign(dV/dv_Dz * k_z)
+    For the vertical game (defender minimizes):
+    u_z = -U_D_z when dV/dv_Dz * k_z > 0, otherwise +U_D_z.
 
     Args:
         vf_data: Value function data (Phi_z or V_z_inf)
@@ -100,12 +100,12 @@ def extract_optimal_control_vertical(
     # Index of v_D_z in the state
     v_idx = 1  # Same for both 3D [z_D, v_D_z, z_A] and 2D [z_rel, v_D_z]
 
-    # Defender maximizes: u_z = U_D_z * sign(dV/dv_Dz * k_z)
+    # Defender minimizes the value.
     direction = grad[v_idx] * k_z
-    if direction >= 0:
-        return u_d_z
-    else:
+    if direction > 0:
         return -u_d_z
+    else:
+        return u_d_z
 
 
 def extract_optimal_disturbance_vertical(
@@ -115,8 +115,8 @@ def extract_optimal_disturbance_vertical(
 ) -> float:
     """Extract optimal attacker disturbance from value function gradient.
 
-    For the 3D vertical game (attacker minimizes):
-    d_z = -U_A_z * sign(dV/dz_A)
+    For the 3D vertical game (attacker maximizes):
+    d_z = +U_A_z when dV/dz_A > 0, otherwise -U_A_z.
 
     For the 2D relative dynamics (attacker maximizes to escape):
     d_z = U_A_z * sign(-dV/dz_rel)  (since z_rel_dot -= d_z)
@@ -132,12 +132,12 @@ def extract_optimal_disturbance_vertical(
     grad = compute_gradient(vf_data, state)
 
     if len(state) == 3:
-        # 3D game: attacker minimizes, d_z = -U_A_z * sign(dV/dz_A)
+        # 3D game: attacker maximizes the value.
         direction = grad[2]
-        if direction >= 0:
-            return -u_a_z
-        else:
+        if direction > 0:
             return u_a_z
+        else:
+            return -u_a_z
     else:
         # 2D relative: attacker maximizes distance, disturbance Jacobian is [-1, 0]
         # So attacker direction = grad @ [-1, 0] = -grad[0]

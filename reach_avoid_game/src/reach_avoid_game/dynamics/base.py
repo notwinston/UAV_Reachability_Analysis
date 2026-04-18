@@ -1,10 +1,11 @@
-"""Base interface for reach-avoid game dynamics.
+"""Base marker class for OptimizedDP-style reach-avoid dynamics.
 
-All dynamics classes extend hj_reachability.ControlAndDisturbanceAffineDynamics
-and additionally provide OptimizedDP-style pure-Python methods for online
-control (opt_ctrl_numpy, opt_dstb_numpy, dynamics_numpy).
+Solver-facing dynamics implement the OptimizedDP methods:
+``opt_ctrl(t, state, spat_deriv)``, ``opt_dstb(t, state, spat_deriv)``,
+and ``dynamics(t, state, uOpt, dOpt)``. Some classes also provide NumPy
+helpers for tests and online control extraction.
 """
 
-import hj_reachability as hj
 
-DynamicsBase = hj.ControlAndDisturbanceAffineDynamics
+class DynamicsBase:
+    """Marker base class for package-local type consistency."""

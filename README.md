@@ -31,9 +31,16 @@ Implementation of Bui et al.'s "Reach-Avoid Differential Game with Reachability 
 ## Setup
 
 ### Python Package (Offline Computation)
+Use the `odp` conda environment for reachability solves and tests. This
+environment is built around SFU-MARS OptimizedDP and HeteroCL; the `.uav`
+virtualenv is not the solver/test runtime unless it also has HeteroCL.
+
 ```bash
+conda activate odp
+/home/ros/anaconda3/envs/odp/bin/python -m pip install "PyYAML>=6,<7" "pytest>=8.3,<9" ruff
 cd reach_avoid_game
-pip install -e ".[dev]"
+/home/ros/anaconda3/envs/odp/bin/python -m pip install -e ".[dev]"
+PYTHONPATH=src /home/ros/anaconda3/envs/odp/bin/python -m pytest -q tests
 ```
 
 ### ROS2 Workspace
@@ -44,7 +51,7 @@ source install/setup.bash
 ```
 
 ## Technical Stack
-- HJ Solver: hj_reachability v0.7.0 (Python/JAX)
+- HJ Solver: SFU-MARS OptimizedDP (`odp`) with HeteroCL
 - ROS2: Humble
 - Gazebo: Harmonic
 - Sim communication: px4_ros_com (XRCE-DDS)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
@@ -38,6 +39,11 @@ def save_value_function(path: str | Path, data: ValueFunctionData) -> None:
 def load_value_function(path: str | Path) -> ValueFunctionData:
     """Load a value function from a .npz file."""
     path = Path(path)
+    # Some checked-in value functions were saved with NumPy 2.x, whose object
+    # pickle paths use numpy._core. The OptimizedDP env uses NumPy 1.x.
+    sys.modules.setdefault("numpy._core", np.core)
+    sys.modules.setdefault("numpy._core.multiarray", np.core.multiarray)
+    sys.modules.setdefault("numpy._core.numeric", np.core.numeric)
     with np.load(path, allow_pickle=True) as npz:
         return ValueFunctionData(
             values=npz["values"],

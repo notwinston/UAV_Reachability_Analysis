@@ -1,10 +1,7 @@
-"""OptimizedDP-compatible HJ solver — pure NumPy implementation.
-
-Implements the same algorithms as SFU-MARS/optimized_dp but without the
-HeteroCL dependency. Works on Python 3.10+.
+"""Thin imports for the installed SFU-MARS OptimizedDP package.
 
 Key components:
-- Grid: computational grid (same API as odp.Grid.GridProcessing.Grid)
+- Grid: computational grid from ``odp.Grid``
 - HJSolver: backward reachable set/tube solver
 - computeSpatDerivArray: spatial derivative computation
 """

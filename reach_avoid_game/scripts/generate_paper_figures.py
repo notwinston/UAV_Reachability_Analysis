@@ -268,8 +268,9 @@ def fig10_winning_regions(vf_dir, output_dir, config):
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    w_d = (sliced <= 0).astype(float)
-    w_a = (sliced > 0).astype(float)
+    # Paper horizontal convention: W_A,h = {Phi_h <= 0}, W_D,h = {Phi_h > 0}.
+    w_d = (sliced > 0).astype(float)
+    w_a = (sliced <= 0).astype(float)
 
     ax.contourf(x_d_axis, y_d_axis, w_d.T, levels=[0.5, 1.5], colors=["steelblue"], alpha=0.5)
     ax.contourf(x_d_axis, y_d_axis, w_a.T, levels=[0.5, 1.5], colors=["salmon"], alpha=0.5)

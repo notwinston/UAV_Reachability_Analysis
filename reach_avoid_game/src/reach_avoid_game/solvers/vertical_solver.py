@@ -18,7 +18,6 @@ from reach_avoid_game.config import GameConfig
 from reach_avoid_game.dynamics.vertical_game import VerticalGameDynamics
 from reach_avoid_game.dynamics.vertical_relative import VerticalRelativeDynamics
 from reach_avoid_game.odp.grid import Grid
-from reach_avoid_game.odp.solver import HJSolver
 from reach_avoid_game.solvers.grid_utils import create_vertical_game_grid, create_vertical_relative_grid
 from reach_avoid_game.solvers.value_function_io import ValueFunctionData, save_value_function, save_time_slices
 
@@ -92,6 +91,7 @@ def solve_vertical_reach_avoid(
 
     grid = create_vertical_game_grid(config)
     dynamics = VerticalGameDynamics(config)
+    from reach_avoid_game.odp.solver import HJSolver
 
     # Create capture set (target for reach computation)
     if v_z_inf_data is not None:
@@ -140,8 +140,11 @@ def solve_vertical_reach_avoid(
             "U_D_z": config.defender.max_speed_vertical,
             "U_A_z": config.attacker.max_speed_vertical,
             "time_horizon": float(T),
+            "control_mode": "min",
+            "disturbance_mode": "max",
+            "convention": "paper_vertical_phi_z",
         },
-        description="Vertical reach-avoid value function Phi_z",
+        description="Paper vertical reach-avoid value function Phi_z (defender min, attacker max)",
     )
     save_value_function(output_path, vf_data)
     print(f"Saved phi_z to {output_path}, shape: {phi_z.shape}")
@@ -167,6 +170,7 @@ def solve_vertical_max_distance(
 
     grid = create_vertical_relative_grid(config)
     dynamics = VerticalRelativeDynamics(config)
+    from reach_avoid_game.odp.solver import HJSolver
 
     # Initial value: |z_rel| — broadcast vs[0] to full grid shape
     z_rel = np.broadcast_to(grid.vs[0], tuple(grid.pts_each_dim)).copy()

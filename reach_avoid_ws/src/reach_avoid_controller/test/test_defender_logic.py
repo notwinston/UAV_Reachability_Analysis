@@ -132,6 +132,85 @@ class TestSafeFallback:
         assert status["h_mode"] == "pid_fallback"
 
 
+class _FakeLoader:
+    def __init__(self, phi_h_value=1.0, b_h_value=0.0, phi_z_value=-1.0):
+        self.loaded_names = {"phi_h", "B_h", "phi_z", "B_z", "V_z_inf", "V_h_T"}
+        self.phi_h_value = phi_h_value
+        self.b_h_value = b_h_value
+        self.phi_z_value = phi_z_value
+
+    def get_params(self, name):
+        params = {
+            "phi_z": {"d_z": 1.0, "k_z": 1.5, "U_D_z": 4.0, "U_A_z": 2.0},
+            "phi_h": {"d_h": 3.0, "k_x": 0.7, "k_y": 0.7, "U_D_h": 6.0, "U_A_h": 3.0},
+            "B_z": {"d_z_effective": 1.0},
+            "B_h": {"d_h_effective": 3.0},
+        }
+        return params.get(name, {})
+
+    def get_value(self, name, state):
+        if name == "phi_h":
+            return self.phi_h_value
+        if name == "B_h":
+            return self.b_h_value
+        if name == "phi_z":
+            return self.phi_z_value
+        if name == "B_z":
+            return 0.0
+        if name in {"V_z_inf", "V_h_T"}:
+            return 10.0
+        return 0.0
+
+    def get_gradient(self, name, state):
+        if name == "phi_h":
+            return np.array([0.0, 0.0, 1.0, -1.0, 0.0, 0.0])
+        if name == "phi_z":
+            return np.array([0.0, 1.0, 0.0])
+        if name == "V_h_T":
+            return np.array([0.0, 0.0, 1.0, -1.0])
+        if name == "V_z_inf":
+            return np.array([0.0, 1.0])
+        return np.zeros(1)
+
+
+class TestCorrectedConventions:
+    def test_horizontal_status_uses_paper_positive_defender_region(self):
+        logic = DefenderControlLogic(_FakeLoader(phi_h_value=1.0))
+        status = logic._check_game_status(
+            vertical_state=np.array([10.0, 0.0, 12.0]),
+            horizontal_state=np.zeros(6),
+            attacker_pos_h=np.zeros(2),
+            z_rel=-2.0,
+            x_rel=4.0,
+            y_rel=0.0,
+            defender_pos=np.array([0.0, 0.0, 10.0]),
+            attacker_pos=np.array([4.0, 0.0, 12.0]),
+        )
+
+        assert status["in_W_D_h"] is True
+
+    def test_horizontal_reaching_only_when_paper_phi_positive(self):
+        state = np.array([5.0, 5.0, 0.0, 0.0, 20.0, 12.5])
+
+        positive_logic = DefenderControlLogic(_FakeLoader(phi_h_value=1.0, b_h_value=0.0))
+        _, _, positive_mode = positive_logic._horizontal_reach_track(
+            state, -15.0, -7.5, 0.0, 0.0, 20.0, 12.5, 5.0, 5.0,
+        )
+
+        negative_logic = DefenderControlLogic(_FakeLoader(phi_h_value=-1.0, b_h_value=0.0))
+        _, _, negative_mode = negative_logic._horizontal_reach_track(
+            state, -15.0, -7.5, 0.0, 0.0, 20.0, 12.5, 5.0, 5.0,
+        )
+
+        assert positive_mode == "reaching"
+        assert negative_mode == "pid_pursuit"
+
+    def test_vertical_reaching_uses_defender_minimizing_sign(self):
+        logic = DefenderControlLogic(_FakeLoader())
+
+        assert logic._optimal_reaching_vertical(np.array([10.0, 0.0, 12.0])) == -logic.U_D_z
+
+
 class TestWallAvoidance:
     """Tests for the wall-avoidance safety layer."""
 

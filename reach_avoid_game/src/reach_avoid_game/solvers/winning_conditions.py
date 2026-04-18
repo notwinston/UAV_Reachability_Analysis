@@ -154,13 +154,9 @@ def check_defender_wins(
 
     Implements the paper's Theorem:
     Defender wins if:
-    1. x_h in W_{D,h} (phi_h(x_h) <= 0 from defender's perspective)
+    1. x_h in W_{D,h} (paper Phi_h(x_h) > 0)
     2. x_z in W_{D,z} (phi_z(x_z) <= 0 from defender's perspective)
     3. T_goal > T_capture (defender captures vertically before attacker reaches goal)
-
-    Note: The value function convention from hj_reachability is that
-    the value function level set {x : V(x) <= 0} represents the
-    set of states from which the target can be reached (capture possible).
 
     Args:
         phi_h: Horizontal reach-avoid value function (6D)
@@ -184,7 +180,7 @@ def check_defender_wins(
     """
     # Check horizontal winning region
     phi_h_val = interpolate_value(phi_h, state_h)
-    in_w_d_h = phi_h_val <= 0  # Defender can capture horizontally
+    in_w_d_h = phi_h_val > 0  # Paper Phi_h: defender wins horizontally when positive
 
     # Check vertical winning region
     phi_z_val = interpolate_value(phi_z, state_z)
@@ -211,7 +207,6 @@ def check_defender_wins(
 
     # If timing info available, check T_goal > T_capture condition
     if phi_a_reach is not None and attacker_pos is not None:
-        params_h = phi_h.params if isinstance(phi_h.params, dict) else {}
         params_z = phi_z.params if isinstance(phi_z.params, dict) else {}
         params_a = phi_a_reach.params if isinstance(phi_a_reach.params, dict) else {}
 
@@ -236,14 +231,16 @@ def check_defender_wins(
 
 def get_winning_regions(
     phi_data: ValueFunctionData,
+    convention: str = "defender_capture",
 ) -> dict:
     """Extract winning regions from a value function.
 
-    W_D (defender wins) = {x : phi(x) <= 0}  (can capture from here)
-    W_A (attacker wins) = {x : phi(x) > 0}   (attacker escapes from here)
+    For ``defender_capture`` values, W_D = {phi <= 0}. For paper horizontal
+    Phi_h, W_A,h = {Phi_h <= 0} and W_D,h = {Phi_h > 0}.
 
     Args:
-        phi_data: Value function data (phi_h or phi_z)
+        phi_data: Value function data
+        convention: "defender_capture", "paper_horizontal", or "attacker_reach"
 
     Returns:
         Dictionary with:
@@ -252,8 +249,14 @@ def get_winning_regions(
         - W_D_fraction: fraction of grid in W_D
         - W_A_fraction: fraction of grid in W_A
     """
-    w_d_mask = phi_data.values <= 0
-    w_a_mask = phi_data.values > 0
+    if convention == "paper_horizontal":
+        w_d_mask = phi_data.values > 0
+        w_a_mask = phi_data.values <= 0
+    elif convention in {"defender_capture", "attacker_reach"}:
+        w_d_mask = phi_data.values <= 0
+        w_a_mask = phi_data.values > 0
+    else:
+        raise ValueError(f"Unknown winning-region convention: {convention}")
 
     return {
         "W_D_mask": w_d_mask,

@@ -249,12 +249,12 @@ class DefenderControlLogic:
     def _optimal_reaching_vertical(self, vertical_state: np.ndarray) -> float:
         """Extract optimal vertical reaching control from phi_z gradient.
 
-        Defender maximizes phi_z: u_z = U_D_z * sign(dPhi_z/dv_Dz * k_z)
+        Defender minimizes phi_z: u_z = -U_D_z when dPhi_z/dv_Dz * k_z > 0.
         """
         grad = self.loader.get_gradient("phi_z", vertical_state)
         # v_D_z is at index 1 in [z_D, v_D_z, z_A]
         direction = grad[1] * self.k_z
-        return self.U_D_z if direction >= 0 else -self.U_D_z
+        return -self.U_D_z if direction > 0 else self.U_D_z
 
     def _optimal_tracking_vertical(self, bz_state: np.ndarray) -> float:
         """Extract optimal vertical tracking control from V_z_inf gradient.
@@ -287,7 +287,7 @@ class DefenderControlLogic:
         """Algorithm 2 -- Horizontal Reach-Track-Avoid controller.
 
         Per the paper, optimal HJ control is only valid inside the
-        defender's winning region (phi_h <= 0). Outside, we use PID pursuit.
+        defender's winning region (paper Phi_h > 0). Outside, we use PID pursuit.
 
         Modes:
         1. Outside winning region: PID pursuit toward attacker
@@ -305,7 +305,7 @@ class DefenderControlLogic:
         in_winning = False
         if "phi_h" in self.loader.loaded_names:
             phi_h_val = self.loader.get_value("phi_h", horizontal_state)
-            in_winning = phi_h_val <= 0
+            in_winning = phi_h_val > 0
 
         # B_h is in relative coords: [x_rel, y_rel, vx_D, vy_D]
         bh_state = np.array([x_rel, y_rel, vx_D, vy_D])
@@ -409,7 +409,7 @@ class DefenderControlLogic:
 
         if "phi_h" in self.loader.loaded_names:
             phi_h_val = self.loader.get_value("phi_h", horizontal_state)
-            status["in_W_D_h"] = phi_h_val <= 0
+            status["in_W_D_h"] = phi_h_val > 0
 
         # Determine overall game status string
         in_w_d_z = status.get("in_W_D_z", False)

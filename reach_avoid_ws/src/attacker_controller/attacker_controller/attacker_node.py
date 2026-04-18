@@ -270,9 +270,9 @@ def main(args=None):
             def _optimal_control(self):
                 """Game-theoretic optimal control using HJ value function gradients.
 
-                Attacker minimizes the game value function (bang-bang control):
+                Attacker optimizes the paper game value functions (bang-bang control):
                   Horizontal: d_x = -U_A_h * sign(dPhi_h/dx_A), d_y = -U_A_h * sign(dPhi_h/dy_A)
-                  Vertical:   d_z = -U_A_z * sign(dPhi_z/dz_A)
+                  Vertical:   d_z = +U_A_z when dPhi_z/dz_A > 0, else -U_A_z
                 Falls back to simple goal-seeking if VFs unavailable or gradient is near-zero.
                 """
                 cmd = Twist()
@@ -315,7 +315,7 @@ def main(args=None):
                     # 3D state: [z_D, v_D_z, z_A]
                     v_state = np.array([z_D, vz_D, z_A])
                     v_grad = self._vf_loader.get_gradient('phi_z', v_state)
-                    # Attacker minimizes: index 2 (z_A)
+                    # Attacker maximizes the vertical value: index 2 (z_A)
                     grad_za = v_grad[2]
 
                     if abs(grad_za) < 1e-10:
@@ -324,7 +324,7 @@ def main(args=None):
                         dz = target_alt - z_A
                         cmd.linear.z = max(-self._U_A_z, min(self._U_A_z, 2.0 * dz))
                     else:
-                        cmd.linear.z = -self._U_A_z if grad_za >= 0 else self._U_A_z
+                        cmd.linear.z = self._U_A_z if grad_za > 0 else -self._U_A_z
 
                 except Exception as e:
                     self.get_logger().warn(

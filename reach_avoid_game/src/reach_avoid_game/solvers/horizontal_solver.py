@@ -20,7 +20,6 @@ from reach_avoid_game.dynamics.horizontal_game import HorizontalGameDynamics, Ho
 from reach_avoid_game.dynamics.horizontal_relative import HorizontalRelativeDynamics
 from reach_avoid_game.dynamics.attacker_reaching import AttackerReachingDynamics
 from reach_avoid_game.odp.grid import Grid
-from reach_avoid_game.odp.solver import HJSolver
 from reach_avoid_game.solvers.grid_utils import (
     create_horizontal_game_grid,
     create_horizontal_relative_grid,
@@ -43,6 +42,19 @@ def _make_horizontal_capture_set(grid: Grid, d_h: float) -> np.ndarray:
     y_a = grid.vs[5] * ones
     dist = np.sqrt((x_a - x_d)**2 + (y_a - y_d)**2)
     return dist - d_h
+
+
+def _make_attacker_target_set(grid: Grid, config: GameConfig) -> np.ndarray:
+    """Create SDF for attacker being inside the horizontal target region."""
+    shape = tuple(grid.pts_each_dim)
+    ones = np.ones(shape)
+    x_a = grid.vs[4] * ones
+    y_a = grid.vs[5] * ones
+    tr = config.target_region
+    return np.maximum(
+        np.maximum(tr.x_min - x_a, x_a - tr.x_max),
+        np.maximum(tr.y_min - y_a, y_a - tr.y_max),
+    )
 
 
 def _make_wall_avoid_set(grid: Grid, config: GameConfig, margin: float = 0.5) -> np.ndarray:
@@ -139,10 +151,10 @@ def _make_obstacle_avoid_set(grid: Grid, config: GameConfig) -> np.ndarray:
     return combined
 
 
-def _make_avoid_set_with_Bh(
+def _interpolate_v_h_t_on_game_grid(
     grid: Grid, config: GameConfig, v_h_t_data: ValueFunctionData, d_h: float,
 ) -> np.ndarray:
-    """Create avoid set combining obstacles and complement(B_h) (Paper Eq. 39)."""
+    """Interpolate V_h_T from relative coordinates onto the 6D game grid."""
     ndim_vht = v_h_t_data.values.ndim
     axes = []
     for i in range(ndim_vht):
@@ -155,11 +167,8 @@ def _make_avoid_set_with_Bh(
         v_h_t_data.values,
         method="linear",
         bounds_error=False,
-        fill_value=-100.0,
+        fill_value=float(d_h) + 1.0,
     )
-
-    v_min = float(v_h_t_data.values.min())
-    d_h_effective = max(d_h, v_min * 1.05)
 
     # Compute relative states from 6D grid
     pts = [grid.grid_points[i] for i in range(6)]
@@ -188,15 +197,29 @@ def _make_avoid_set_with_Bh(
         v_h_t_values[start:end] = interp(query)
 
     v_h_t_values = v_h_t_values.reshape(shape)
+    return v_h_t_values
 
-    # l_Bh_complement = d_h_effective - V_h_T
-    # Negative outside B_h (avoid), positive inside (safe)
-    l_bh_complement = d_h_effective - v_h_t_values
 
-    obstacle_values = _make_obstacle_avoid_set(grid, config)
-    combined = np.minimum(np.asarray(obstacle_values), l_bh_complement)
+def _make_paper_horizontal_reach_set(grid: Grid, config: GameConfig) -> np.ndarray:
+    """Create paper R_h: attacker reaches target OR defender hits obstacle/wall."""
+    attacker_target = _make_attacker_target_set(grid, config)
+    defender_obstacle = _make_obstacle_avoid_set(grid, config)
+    return np.minimum(attacker_target, defender_obstacle)
 
-    return combined
+
+def _make_paper_horizontal_avoid_set(
+    grid: Grid, config: GameConfig, v_h_t_data: ValueFunctionData, d_h: float,
+) -> np.ndarray:
+    """Create paper A_h: (B_h and attacker not in target) OR attacker obstacle."""
+    v_h_t_values = _interpolate_v_h_t_on_game_grid(grid, config, v_h_t_data, d_h)
+    b_h_sdf = v_h_t_values - d_h
+
+    target_sdf = _make_attacker_target_set(grid, config)
+    attacker_not_target_sdf = -target_sdf
+    capture_before_target = np.maximum(b_h_sdf, attacker_not_target_sdf)
+
+    attacker_obstacles = _make_attacker_obstacle_avoid_set(grid, config)
+    return np.minimum(capture_before_target, attacker_obstacles)
 
 
 def solve_horizontal_reach_avoid(
@@ -217,21 +240,17 @@ def solve_horizontal_reach_avoid(
 
     grid = create_horizontal_game_grid(config)
     dynamics = HorizontalGameDynamics(config)
+    from reach_avoid_game.odp.solver import HJSolver
 
-    # Target: capture set
-    target_values = _make_horizontal_capture_set(grid, config.capture.d_h)
+    if v_h_t_data is None:
+        raise ValueError("Paper Phi_h requires V_h_T data to construct B_h in A_h")
 
-    # Avoid set
-    if v_h_t_data is not None:
-        obstacle_values = _make_avoid_set_with_Bh(grid, config, v_h_t_data, config.capture.d_h)
-        print("  Using B_h feedback in avoid set per Paper Eq. 39")
-    else:
-        obstacle_values = _make_obstacle_avoid_set(grid, config)
-
-    # Add attacker wall/obstacle avoidance per Paper Eq. 20b: {x_A^h in Omega_obs}
-    attacker_obstacles = _make_attacker_obstacle_avoid_set(grid, config)
-    obstacle_values = np.minimum(obstacle_values, attacker_obstacles)
-    print("  Added attacker wall/obstacle avoidance per Paper Eq. 20b")
+    target_values = _make_paper_horizontal_reach_set(grid, config)
+    obstacle_values = _make_paper_horizontal_avoid_set(
+        grid, config, v_h_t_data, config.capture.d_h,
+    )
+    print("  Using paper R_h: attacker target OR defender obstacle")
+    print("  Using paper A_h: (B_h AND attacker not in target) OR attacker obstacle")
 
     # Time horizon
     T = 10.0 if preset == "dev" else 22.0
@@ -242,7 +261,7 @@ def solve_horizontal_reach_avoid(
     print(f"Solving horizontal reach-avoid game (6D grid: {tuple(grid.pts_each_dim)})...")
     print(f"  Time horizon: T={T}s, steps: {n_steps}")
 
-    # Reach-avoid: use target and obstacle (walls + obstacles always present)
+    # Paper Phi_h: sub-zero means attacker-winning horizontal reach-avoid state.
     compMethod = {
         "TargetSetMode": "minVWithV0",
         "ObstacleSetMode": "maxVWithObstacle",
@@ -267,8 +286,11 @@ def solve_horizontal_reach_avoid(
             "U_D_h": config.defender.max_speed_horizontal,
             "U_A_h": config.attacker.max_speed_horizontal,
             "time_horizon": float(T),
+            "convention": "paper_horizontal_phi_h",
+            "attacker_wins": "phi_h <= 0",
+            "defender_wins": "phi_h > 0",
         },
-        description="Horizontal reach-avoid value function Phi_h (6D)",
+        description="Paper horizontal reach-avoid value function Phi_h (6D): attacker wins <= 0",
     )
     save_value_function(output_path, vf_data)
     print(f"Saved phi_h to {output_path}, shape: {phi_h.shape}")
@@ -294,6 +316,7 @@ def solve_horizontal_max_distance(
 
     grid = create_horizontal_relative_grid(config)
     dynamics = HorizontalRelativeDynamics(config)
+    from reach_avoid_game.odp.solver import HJSolver
 
     # Initial value: horizontal distance = sqrt(x_rel^2 + y_rel^2)
     # grid.vs are broadcast-shaped; compute over full grid via broadcasting
@@ -397,6 +420,7 @@ def solve_attacker_reaching(
 
     grid = create_attacker_reaching_grid(config)
     dynamics = AttackerReachingDynamics(config)
+    from reach_avoid_game.odp.solver import HJSolver
 
     # Target: box region from config
     tr = config.target_region
@@ -485,6 +509,7 @@ def solve_horizontal_max_distance_6d(
 
     grid = create_horizontal_game_grid(config)
     dynamics = HorizontalGameTrackingDynamics(config)
+    from reach_avoid_game.odp.solver import HJSolver
 
     # Initial values: horizontal distance (broadcast grid.vs to full shape)
     shape = tuple(grid.pts_each_dim)

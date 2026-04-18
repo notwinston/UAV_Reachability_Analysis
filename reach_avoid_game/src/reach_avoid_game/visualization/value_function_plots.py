@@ -111,11 +111,12 @@ def plot_winning_regions(
     ax: plt.Axes | None = None,
     save_path: str | Path | None = None,
     title: str | None = None,
+    convention: str = "defender_capture",
 ) -> plt.Axes:
     """Plot winning regions W_D (blue) and W_A (red).
 
-    W_D = {x : phi(x) <= 0} (defender wins)
-    W_A = {x : phi(x) > 0}  (attacker wins)
+    For ``defender_capture``, W_D = {phi <= 0}. For paper horizontal Phi_h,
+    W_D,h = {Phi_h > 0} and W_A,h = {Phi_h <= 0}.
 
     Args:
         phi_data: Value function data
@@ -124,6 +125,7 @@ def plot_winning_regions(
         ax: Optional matplotlib Axes
         save_path: Optional path to save figure
         title: Optional title
+        convention: "defender_capture" or "paper_horizontal"
 
     Returns:
         The matplotlib Axes object
@@ -174,8 +176,14 @@ def plot_winning_regions(
         fig, ax = plt.subplots(1, 1, figsize=(8, 6))
 
     # W_D in blue, W_A in red
-    w_d = (plot_data <= 0).astype(float)
-    w_a = (plot_data > 0).astype(float)
+    if convention == "paper_horizontal":
+        w_d = (plot_data > 0).astype(float)
+        w_a = (plot_data <= 0).astype(float)
+    elif convention == "defender_capture":
+        w_d = (plot_data <= 0).astype(float)
+        w_a = (plot_data > 0).astype(float)
+    else:
+        raise ValueError(f"Unknown winning-region convention: {convention}")
 
     from matplotlib.colors import ListedColormap
     cmap_wd = ListedColormap(["white", "steelblue"])

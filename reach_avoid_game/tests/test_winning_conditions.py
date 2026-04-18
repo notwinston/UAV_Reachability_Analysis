@@ -1,5 +1,7 @@
 """Tests for winning condition checker."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -14,29 +16,35 @@ from reach_avoid_game.solvers.winning_conditions import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_PATH = REPO_ROOT / "config" / "game_params.yaml"
+VALUE_FUNCTION_DIR = REPO_ROOT / "data" / "value_functions"
+PHI_Z_TIME_SLICES_PATH = VALUE_FUNCTION_DIR / "phi_z_time_slices.npz"
+
+
 @pytest.fixture(scope="module")
 def config():
-    return GameConfig.from_yaml("/workspace/config/game_params.yaml")
+    return GameConfig.from_yaml(CONFIG_PATH)
 
 
 @pytest.fixture(scope="module")
 def phi_h():
-    return load_value_function("/workspace/data/value_functions/phi_h.npz")
+    return load_value_function(VALUE_FUNCTION_DIR / "phi_h.npz")
 
 
 @pytest.fixture(scope="module")
 def phi_z():
-    return load_value_function("/workspace/data/value_functions/phi_z.npz")
+    return load_value_function(VALUE_FUNCTION_DIR / "phi_z.npz")
 
 
 @pytest.fixture(scope="module")
 def b_z():
-    return load_value_function("/workspace/data/value_functions/B_z.npz")
+    return load_value_function(VALUE_FUNCTION_DIR / "B_z.npz")
 
 
 @pytest.fixture(scope="module")
 def phi_a_reach():
-    return load_value_function("/workspace/data/value_functions/phi_A_reach.npz")
+    return load_value_function(VALUE_FUNCTION_DIR / "phi_A_reach.npz")
 
 
 class TestTGoal:
@@ -94,7 +102,7 @@ class TestTCaptureFromSlices:
         """compute_T_capture_from_slices should return a float."""
         state = np.array([10.0, 0.0, 10.0])
         tc = compute_T_capture_from_slices(
-            "/workspace/data/value_functions/phi_z_time_slices.npz",
+            PHI_Z_TIME_SLICES_PATH,
             state, phi_z.grid_min, phi_z.grid_max, phi_z.grid_shape,
         )
         assert isinstance(tc, float)
@@ -106,11 +114,11 @@ class TestTCaptureFromSlices:
         state_far = np.array([2.0, 0.0, 18.0])
 
         tc_close = compute_T_capture_from_slices(
-            "/workspace/data/value_functions/phi_z_time_slices.npz",
+            PHI_Z_TIME_SLICES_PATH,
             state_close, phi_z.grid_min, phi_z.grid_max, phi_z.grid_shape,
         )
         tc_far = compute_T_capture_from_slices(
-            "/workspace/data/value_functions/phi_z_time_slices.npz",
+            PHI_Z_TIME_SLICES_PATH,
             state_far, phi_z.grid_min, phi_z.grid_max, phi_z.grid_shape,
         )
         # On dev grid both may be inf (B_z target too small)
@@ -123,13 +131,43 @@ class TestTCaptureFromSlices:
         # State far outside any capture possibility
         state = np.array([0.5, -4.0, 19.5])  # z_D near floor, z_A near ceiling, moving away
         tc = compute_T_capture_from_slices(
-            "/workspace/data/value_functions/phi_z_time_slices.npz",
+            PHI_Z_TIME_SLICES_PATH,
             state, phi_z.grid_min, phi_z.grid_max, phi_z.grid_shape,
         )
         assert tc == float("inf")
 
 
 class TestCheckDefenderWins:
+    def test_horizontal_paper_phi_positive_is_defender_winning(self, phi_z, b_z):
+        """Paper Phi_h convention: positive means defender-winning horizontally."""
+        phi_h = ValueFunctionData(
+            values=np.full((2, 2, 2, 2, 2, 2), 1.0),
+            grid_min=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            grid_max=np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            grid_shape=(2, 2, 2, 2, 2, 2),
+            params={"convention": "paper_horizontal_phi_h"},
+        )
+        phi_z = ValueFunctionData(
+            values=np.full((2, 2, 2), -1.0),
+            grid_min=np.array([0.0, 0.0, 0.0]),
+            grid_max=np.array([1.0, 1.0, 1.0]),
+            grid_shape=(2, 2, 2),
+        )
+        b_z = ValueFunctionData(
+            values=np.full((2, 2), 1.0),
+            grid_min=np.array([0.0, 0.0]),
+            grid_max=np.array([1.0, 1.0]),
+            grid_shape=(2, 2),
+        )
+
+        result = check_defender_wins(
+            phi_h, phi_z, b_z,
+            np.zeros(6), np.zeros(3),
+        )
+
+        assert result["in_W_D_h"] is True
+        assert result["defender_wins"] is True
+
     def test_returns_required_keys(self, phi_h, phi_z, b_z):
         """check_defender_wins should return all required keys."""
         state_h = np.array([10.0, 10.0, 0.0, 0.0, 10.0, 10.0])
@@ -200,7 +238,7 @@ class TestGetWinningRegions:
 
     def test_attacker_reaching_has_reachable_region(self, phi_a_reach):
         """Attacker reaching VF should have non-empty reachable set (phi <= 0)."""
-        regions = get_winning_regions(phi_a_reach)
+        regions = get_winning_regions(phi_a_reach, convention="attacker_reach")
         # For attacker reaching, W_D_mask (<=0) is the reachable set
         assert regions["W_D_fraction"] > 0, "Attacker should be able to reach target from some positions"
 
@@ -209,3 +247,14 @@ class TestGetWinningRegions:
         regions = get_winning_regions(phi_z)
         assert regions["W_D_mask"].shape == phi_z.values.shape
         assert regions["W_A_mask"].shape == phi_z.values.shape
+
+    def test_paper_horizontal_regions_use_positive_defender_convention(self):
+        phi = ValueFunctionData(
+            values=np.array([-1.0, 0.0, 2.0]),
+            grid_min=np.array([0.0]),
+            grid_max=np.array([2.0]),
+            grid_shape=(3,),
+        )
+        regions = get_winning_regions(phi, convention="paper_horizontal")
+        np.testing.assert_array_equal(regions["W_A_mask"], np.array([True, True, False]))
+        np.testing.assert_array_equal(regions["W_D_mask"], np.array([False, False, True]))
