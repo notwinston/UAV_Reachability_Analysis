@@ -2,7 +2,84 @@
 
 Reproduces Figures 4-12 from the paper using the computed value functions.
 Each figure function loads the required data and saves a publication-quality PNG.
+
+Figure catalogue
+----------------
+Paper figures (static value-function visualizations):
+
+  fig_4.png  — B_z invariant capture set in the (z_rel, v_Dz) plane.
+               The filled contour shows V_z_inf; the black boundary marks the
+               set where the defender can guarantee vertical capture (V_z_inf = d_z).
+
+  fig_5.png  — Phi_z value-function slices at three representative defender
+               vertical velocities (v_Dz = -2, 0, +2 m/s).  Each panel shows
+               the zero-level set that separates defender-winning from
+               attacker-winning initial conditions in the (z_D, z_A) plane.
+
+  fig_6.png  — Side-by-side view of the vertical sub-game: left panel is Phi_z
+               at v_Dz = 0 with the diagonal capture band; right panel is V_z_inf
+               with the B_z boundary overlaid.
+
+  fig_7.png  — Obstacle-aware B_h horizontal capture set.  Sliced at v_D = 0 with
+               the attacker fixed at the room centre.  Shows how obstacles deform
+               the reachable capture region in the (x_D, y_D) plane.
+
+  fig_8.png  — Phi_h value-function slice at v_D = 0, attacker at room centre.
+               Zero contour separates W_D (defender wins) from W_A (attacker wins).
+               Obstacles and the target region are overlaid.
+
+  fig_10.png — Horizontal winning regions W_D (blue) and W_A (salmon) derived from
+               the sign of Phi_h, sliced at v_D = 0 with attacker at room centre.
+               Obstacles and target region overlaid for spatial context.
+
+  fig_attacker_reaching.png — Attacker's own reach value function phi_A_reach in the
+               (x_A, y_A) plane.  Zero contour marks the boundary from which the
+               attacker can reach the target despite the defender.
+
+  fig_vertical_winning.png  — Vertical winning regions W_Dz (blue) and W_Az (salmon)
+               derived from Phi_z at v_Dz = 0.  Shows the altitude pairs from which
+               each agent prevails.
+
+Simulation figures (40 s forward-Euler trajectories, defender at (35, 20, 8),
+                    attacker at (5, 3, 3) — opposite corners, attacker behind obstacle):
+
+  fig_11.png — Side-by-side simulation summary: left panel shows 2D (x, y) paths
+               for both agents with obstacles and target; right panel shows altitude
+               z_D and z_A vs time with the vertical capture band and mode annotations.
+
+  fig_12.png — Full 3D trajectory view.  Both drone paths plotted in (x, y, z) space
+               with obstacle wireframes and the target floor outline.
+
+Analysis figures (derived from the same simulation run):
+
+  fig_distance_over_time.png — Three stacked panels showing 3D Euclidean distance,
+               horizontal distance, and vertical distance between the agents over
+               time.  Dashed green lines mark the respective capture thresholds
+               (d_h, d_z) so convergence rate is immediately visible.
+
+  fig_control_effort.png — 2x3 grid of control and disturbance signals over time.
+               Top row: defender inputs u_x, u_y, u_z.  Bottom row: attacker
+               disturbances d_x, d_y, d_z.  Dotted lines show saturation limits.
+
+  fig_speed_profiles.png — Left panel overlays horizontal and vertical speed
+               components for both agents; right panel shows full 3D speed
+               magnitudes.  Useful for checking whether agents saturate their
+               speed limits and for comparing agility.
+
+  fig_mode_timeline.png — Two colour-coded timeline strips (vertical sub-game on
+               top, horizontal on bottom).  Red = Reach (optimising Phi), blue =
+               Track boundary (optimising V_h_T / V_z_inf), green = PID (deep
+               inside invariant set).  Shows exactly when and for how long each
+               control regime is active.
+
+  fig_altitude_phase_portrait.png — Trajectory in the (z_D, z_A) phase plane,
+               coloured by elapsed time (viridis).  The green band marks the
+               vertical capture zone (|z_D - z_A| <= d_z).  Reveals whether the
+               defender converges to the diagonal and whether altitude capture
+               precedes or follows horizontal capture.
 """
+
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -17,7 +94,53 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 
 from reach_avoid_game.config import GameConfig
-from reach_avoid_game.solvers.value_function_io import load_value_function
+from reach_avoid_game.solvers.value_function_io import is_paper_valid, load_value_function
+
+
+SIMULATION_HORIZON_SECONDS = 40.0
+
+
+PAPER_REQUIRED = {"B_z.npz", "B_h.npz", "phi_z.npz", "phi_h.npz"}
+FIGURE_OUTPUTS = {
+    "Fig 4": "fig_4.png",
+    "Fig 5": "fig_5.png",
+    "Fig 6": "fig_6.png",
+    "Fig 7": "fig_7.png",
+    "Fig 8": "fig_8.png",
+    "Fig 10": "fig_10.png",
+    "Fig 11": "fig_11.png",
+    "Fig 12": "fig_12.png",
+    "Attacker Reaching": "fig_attacker_reaching.png",
+    "Vertical Winning": "fig_vertical_winning.png",
+    "Distance Over Time": "fig_distance_over_time.png",
+    "Control Effort": "fig_control_effort.png",
+    "Speed Profiles": "fig_speed_profiles.png",
+    "Mode Timeline": "fig_mode_timeline.png",
+    "Altitude Phase Portrait": "fig_altitude_phase_portrait.png",
+}
+
+
+def _diagnostic_figure(output_dir: Path, filename: str, title: str, message: str) -> None:
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.axis("off")
+    ax.text(0.5, 0.65, title, ha="center", va="center", fontsize=14, weight="bold")
+    ax.text(0.5, 0.35, message, ha="center", va="center", fontsize=11, wrap=True)
+    fig.tight_layout()
+    fig.savefig(str(output_dir / filename), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _invalid_paper_deps(vf_dir: Path, deps: list[str]) -> list[str]:
+    invalid = []
+    for dep in deps:
+        if dep not in PAPER_REQUIRED:
+            continue
+        try:
+            if not is_paper_valid(load_value_function(vf_dir / dep)):
+                invalid.append(dep)
+        except Exception:
+            invalid.append(dep)
+    return invalid
 
 
 def _build_axes(vf_data, dim_indices):
@@ -61,6 +184,16 @@ def _slice_nd(vf_data, fix_dims, fix_values):
     return sliced, x_axis, y_axis
 
 
+def _contour_if_in_range(ax, x_axis, y_axis, values_t, level, **kwargs):
+    """Draw a contour level only when it lies inside the plotted value range."""
+    v_min = float(np.nanmin(values_t))
+    v_max = float(np.nanmax(values_t))
+    if v_min <= float(level) <= v_max:
+        ax.contour(x_axis, y_axis, values_t, levels=[level], **kwargs)
+        return True
+    return False
+
+
 def fig4_bz_invariant_set(vf_dir, output_dir, config):
     """Fig 4 — B_z invariant set: 2D contour of V_z_inf with B_z boundary."""
     v_z_inf = load_value_function(vf_dir / "V_z_inf.npz")
@@ -71,21 +204,19 @@ def fig4_bz_invariant_set(vf_dir, output_dir, config):
     cf = ax.contourf(z_rel_axis, v_dz_axis, v_z_inf.values.T, levels=20, cmap="viridis")
     plt.colorbar(cf, ax=ax, label=r"$V_{z,\infty}$ (m)")
 
-    # B_z boundary: V_z_inf = d_z (or d_z_effective)
-    b_z = load_value_function(vf_dir / "B_z.npz")
-    d_z_eff = b_z.params.get("d_z_effective", config.capture.d_z) if isinstance(b_z.params, dict) else config.capture.d_z
-    ax.contour(z_rel_axis, v_dz_axis, v_z_inf.values.T, levels=[d_z_eff],
-               colors="black", linewidths=2.5, linestyles="solid")
-    ax.contour(z_rel_axis, v_dz_axis, v_z_inf.values.T, levels=[config.capture.d_z],
-               colors="red", linewidths=1.5, linestyles="dashed")
+    # B_z boundary: paper threshold V_z_inf = d_z.
+    drawn = _contour_if_in_range(
+        ax, z_rel_axis, v_dz_axis, v_z_inf.values.T, config.capture.d_z,
+        colors="black", linewidths=2.5, linestyles="solid",
+    )
 
     ax.set_xlabel(r"$z_{rel}$ (m)", fontsize=12)
     ax.set_ylabel(r"$v_{D,z}$ (m/s)", fontsize=12)
     ax.set_title(r"Vertical Invariant Capture Set $B_z$", fontsize=14)
 
     legend = [
-        plt.Line2D([0], [0], color="black", linewidth=2.5, label=f"$B_z$ boundary ($d_z^{{eff}}={d_z_eff:.3f}$)"),
-        plt.Line2D([0], [0], color="red", linewidth=1.5, linestyle="dashed", label=f"$d_z={config.capture.d_z}$"),
+        plt.Line2D([0], [0], color="black", linewidth=2.5,
+                   label=f"$B_z$ boundary ($d_z={config.capture.d_z}$" + (")" if drawn else ", outside range)")),
     ]
     ax.legend(handles=legend, loc="upper right")
     ax.grid(True, alpha=0.3)
@@ -163,11 +294,17 @@ def fig6_vertical_3d(vf_dir, output_dir, config):
 
     cf2 = axes[1].contourf(z_rel_axis, v_dz_axis, v_z_inf.values.T, levels=20, cmap="viridis")
     plt.colorbar(cf2, ax=axes[1], label=r"$V_{z,\infty}$")
-    axes[1].contour(z_rel_axis, v_dz_axis, v_z_inf.values.T, levels=[config.capture.d_z],
-                    colors="red", linewidths=2, linestyles="dashed")
+    drawn = _contour_if_in_range(
+        axes[1], z_rel_axis, v_dz_axis, v_z_inf.values.T, config.capture.d_z,
+        colors="black", linewidths=2.5,
+    )
     axes[1].set_xlabel(r"$z_{rel}$ (m)", fontsize=12)
     axes[1].set_ylabel(r"$v_{D,z}$ (m/s)", fontsize=12)
-    axes[1].set_title(r"$V_{z,\infty}$ with $B_z$ boundary", fontsize=13)
+    axes[1].set_title(r"$V_{z,\infty}$ with paper $B_z$ boundary", fontsize=13)
+    axes[1].legend(handles=[
+        plt.Line2D([0], [0], color="black", linewidth=2.5,
+                   label=rf"$d_z={config.capture.d_z}$" + ("" if drawn else " (outside range)")),
+    ], loc="upper right")
     axes[1].grid(True, alpha=0.3)
 
     fig.suptitle("Vertical Sub-Game Analysis", fontsize=14, y=1.02)
@@ -178,35 +315,37 @@ def fig6_vertical_3d(vf_dir, output_dir, config):
 
 
 def fig7_bh_invariant_set(vf_dir, output_dir, config):
-    """Fig 7 — B_h invariant set: 2D contour of V_h_T at v_Dx=0, v_Dy=0."""
-    v_h_t = load_value_function(vf_dir / "V_h_T.npz")
+    """Fig 7 — B_h invariant set from obstacle-aware 6D V_h_T."""
+    v_h_t = load_value_function(vf_dir / "V_h_T_6d.npz")
 
-    # Slice at v_Dx=0, v_Dy=0 (dims 2, 3)
-    sliced, x_rel_axis, y_rel_axis = _slice_nd(v_h_t, [2, 3], [0.0, 0.0])
+    x_a_mid = (config.room.x_min + config.room.x_max) / 2
+    y_a_mid = (config.room.y_min + config.room.y_max) / 2
+    sliced, x_axis, y_axis = _slice_nd(v_h_t, [2, 3, 4, 5], [0.0, 0.0, x_a_mid, y_a_mid])
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    cf = ax.contourf(x_rel_axis, y_rel_axis, sliced.T, levels=20, cmap="viridis")
+    cf = ax.contourf(x_axis, y_axis, sliced.T, levels=20, cmap="viridis")
     plt.colorbar(cf, ax=ax, label=r"$V_{h,T}$ (m)")
 
-    # B_h boundary
-    b_h = load_value_function(vf_dir / "B_h.npz")
-    d_h_eff = b_h.params.get("d_h_effective", config.capture.d_h) if isinstance(b_h.params, dict) else config.capture.d_h
-    ax.contour(x_rel_axis, y_rel_axis, sliced.T, levels=[d_h_eff],
-               colors="black", linewidths=2.5)
-    ax.contour(x_rel_axis, y_rel_axis, sliced.T, levels=[config.capture.d_h],
-               colors="red", linewidths=1.5, linestyles="dashed")
+    # B_h boundary: paper threshold V_h = d_h.
+    drawn = _contour_if_in_range(
+        ax, x_axis, y_axis, sliced.T, config.capture.d_h,
+        colors="black", linewidths=2.5,
+    )
 
     # d_h circle for reference
     theta = np.linspace(0, 2 * np.pi, 100)
-    ax.plot(config.capture.d_h * np.cos(theta), config.capture.d_h * np.sin(theta),
+    ax.plot(x_a_mid + config.capture.d_h * np.cos(theta), y_a_mid + config.capture.d_h * np.sin(theta),
             "w--", linewidth=1, alpha=0.5, label=f"$d_h={config.capture.d_h}$m circle")
 
-    ax.set_xlabel(r"$x_{rel}$ (m)", fontsize=12)
-    ax.set_ylabel(r"$y_{rel}$ (m)", fontsize=12)
-    ax.set_title(r"Horizontal Invariant Capture Set $B_h$ ($v_{D,x}=0, v_{D,y}=0$)", fontsize=14)
+    ax.set_xlabel(r"$x_D$ (m)", fontsize=12)
+    ax.set_ylabel(r"$y_D$ (m)", fontsize=12)
+    ax.set_title(r"Obstacle-aware $B_h$ slice ($v_D=0$, attacker at center)", fontsize=14)
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right")
+    handles, labels = ax.get_legend_handles_labels()
+    handles.append(plt.Line2D([0], [0], color="black", linewidth=2.5))
+    labels.append(f"$B_h$ boundary ($d_h={config.capture.d_h}$" + (")" if drawn else ", outside range)"))
+    ax.legend(handles, labels, loc="upper right")
 
     fig.tight_layout()
     fig.savefig(str(output_dir / "fig_7.png"), dpi=150, bbox_inches="tight")
@@ -321,7 +460,9 @@ def fig11_simulation_trajectories(vf_dir, output_dir, config):
     """Fig 11 — Simulation trajectories: x-y and z-t side by side."""
     run_combined_sim = _load_numerical_sim()
 
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=10.0)
+    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+    if traj.get("obstacle_violation", False):
+        raise ValueError("combined simulation trajectory enters an obstacle")
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
@@ -379,7 +520,7 @@ def fig11_simulation_trajectories(vf_dir, output_dir, config):
     ax2.legend(loc="upper right")
     ax2.grid(True, alpha=0.3)
 
-    fig.suptitle(f"Combined Simulation (3D capture: {traj['captured_3d']})", fontsize=14, y=1.02)
+    fig.suptitle(f"Combined Simulation — {traj['outcome']}", fontsize=14, y=1.02)
     fig.tight_layout()
     fig.savefig(str(output_dir / "fig_11.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -390,7 +531,9 @@ def fig12_combined_3d(vf_dir, output_dir, config):
     """Fig 12 — Combined 3D game view: 3D plot of both drone paths."""
     run_combined_sim = _load_numerical_sim()
 
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=10.0)
+    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+    if traj.get("obstacle_violation", False):
+        raise ValueError("combined simulation trajectory enters an obstacle")
 
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection="3d")
@@ -424,7 +567,7 @@ def fig12_combined_3d(vf_dir, output_dir, config):
     ax.set_xlabel("x (m)", fontsize=11)
     ax.set_ylabel("y (m)", fontsize=11)
     ax.set_zlabel("z (m)", fontsize=11)
-    ax.set_title("3D Game Trajectories", fontsize=14)
+    ax.set_title(f"3D Game Trajectories — {traj['outcome']}", fontsize=13)
     ax.legend(loc="upper left")
 
     fig.tight_layout()
@@ -505,6 +648,246 @@ def fig_vertical_winning_regions(vf_dir, output_dir, config):
     print("  Saved fig_vertical_winning.png")
 
 
+def fig_distance_over_time(vf_dir, output_dir, config):
+    """Analysis — 3D, horizontal, and vertical inter-agent distances vs time."""
+    run_combined_sim = _load_numerical_sim()
+    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+
+    dt = traj["dt"]
+    n = len(traj["x_d"])
+    t = np.arange(n) * dt
+
+    h_dist = np.sqrt((traj["x_d"] - traj["x_a"])**2 + (traj["y_d"] - traj["y_a"])**2)
+    z_dist = np.abs(traj["z_d"] - traj["z_a"])
+    dist_3d = np.sqrt(h_dist**2 + z_dist**2)
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+
+    axes[0].plot(t, dist_3d, "k-", linewidth=2, label="3D distance")
+    axes[0].axhline(np.sqrt(config.capture.d_h**2 + config.capture.d_z**2),
+                    color="green", linestyle="--", linewidth=1.5, label="Approx 3D capture threshold")
+    axes[0].set_ylabel("Distance (m)", fontsize=11)
+    axes[0].set_title("3D Euclidean Distance Between Agents", fontsize=12)
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(t, h_dist, "b-", linewidth=2, label="Horizontal distance")
+    axes[1].axhline(config.capture.d_h, color="green", linestyle="--", linewidth=1.5,
+                    label=f"$d_h = {config.capture.d_h}$m")
+    axes[1].set_ylabel("Distance (m)", fontsize=11)
+    axes[1].set_title("Horizontal Distance", fontsize=12)
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(t, z_dist, "r-", linewidth=2, label="Vertical distance")
+    axes[2].axhline(config.capture.d_z, color="green", linestyle="--", linewidth=1.5,
+                    label=f"$d_z = {config.capture.d_z}$m")
+    axes[2].set_ylabel("Distance (m)", fontsize=11)
+    axes[2].set_xlabel("Time (s)", fontsize=11)
+    axes[2].set_title("Vertical Distance", fontsize=12)
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+
+    fig.suptitle(f"Inter-Agent Distances (3D capture: {traj['captured_3d']})", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(str(output_dir / "fig_distance_over_time.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  Saved fig_distance_over_time.png")
+
+
+def fig_control_effort(vf_dir, output_dir, config):
+    """Analysis — Defender control inputs (u_x, u_y, u_z) and attacker disturbances over time."""
+    run_combined_sim = _load_numerical_sim()
+    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+
+    dt = traj["dt"]
+    n = len(traj["u_x"])
+    t = np.arange(n) * dt
+
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8))
+
+    ctrl_labels = [
+        ("u_x", "Defender $u_x$", "blue"),
+        ("u_y", "Defender $u_y$", "blue"),
+        ("u_z", "Defender $u_z$", "blue"),
+    ]
+    dist_labels = [
+        ("d_x", "Attacker $d_x$", "red"),
+        ("d_y", "Attacker $d_y$", "red"),
+        ("d_z_ctrl", "Attacker $d_z$", "red"),
+    ]
+    speed_limits = [
+        config.defender.max_speed_horizontal,
+        config.defender.max_speed_horizontal,
+        config.defender.max_speed_vertical,
+    ]
+    att_limits = [
+        config.attacker.max_speed_horizontal,
+        config.attacker.max_speed_horizontal,
+        config.attacker.max_speed_vertical,
+    ]
+
+    for col, ((ctrl_key, ctrl_lbl, _), (dist_key, dist_lbl, _), u_max, d_max) in enumerate(
+        zip(ctrl_labels, dist_labels, speed_limits, att_limits)
+    ):
+        ax = axes[0, col]
+        ax.plot(t, traj[ctrl_key], "b-", linewidth=1.5, label=ctrl_lbl)
+        ax.axhline(u_max, color="gray", linestyle=":", linewidth=1)
+        ax.axhline(-u_max, color="gray", linestyle=":", linewidth=1)
+        ax.set_title(ctrl_lbl, fontsize=11)
+        ax.set_ylabel("Speed (m/s)", fontsize=10)
+        ax.set_xlabel("Time (s)", fontsize=10)
+        ax.grid(True, alpha=0.3)
+
+        ax2 = axes[1, col]
+        ax2.plot(t, traj[dist_key], "r-", linewidth=1.5, label=dist_lbl)
+        ax2.axhline(d_max, color="gray", linestyle=":", linewidth=1)
+        ax2.axhline(-d_max, color="gray", linestyle=":", linewidth=1)
+        ax2.set_title(dist_lbl, fontsize=11)
+        ax2.set_ylabel("Speed (m/s)", fontsize=10)
+        ax2.set_xlabel("Time (s)", fontsize=10)
+        ax2.grid(True, alpha=0.3)
+
+    fig.suptitle("Control Inputs and Disturbances Over Time", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(str(output_dir / "fig_control_effort.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  Saved fig_control_effort.png")
+
+
+def fig_speed_profiles(vf_dir, output_dir, config):
+    """Analysis — Speed magnitude profiles for defender and attacker over time."""
+    run_combined_sim = _load_numerical_sim()
+    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+
+    dt = traj["dt"]
+    n = len(traj["v_dx"])
+    t = np.arange(n) * dt
+
+    speed_d_h = np.sqrt(traj["v_dx"]**2 + traj["v_dy"]**2)
+    speed_d_3d = np.sqrt(traj["v_dx"]**2 + traj["v_dy"]**2 + traj["v_dz"]**2)
+
+    # Attacker speed from integrated disturbance (first-order)
+    n_u = len(traj["d_x"])
+    t_u = np.arange(n_u) * dt
+    speed_a_h = np.sqrt(traj["d_x"]**2 + traj["d_y"]**2)
+    speed_a_3d = np.sqrt(traj["d_x"]**2 + traj["d_y"]**2 + traj["d_z_ctrl"]**2)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].plot(t, speed_d_h, "b-", linewidth=2, label="Defender horizontal")
+    axes[0].plot(t, np.abs(traj["v_dz"]), "b--", linewidth=1.5, label="Defender vertical")
+    axes[0].plot(t_u, speed_a_h, "r-", linewidth=2, label="Attacker horizontal cmd")
+    axes[0].plot(t_u, np.abs(traj["d_z_ctrl"]), "r--", linewidth=1.5, label="Attacker vertical cmd")
+    axes[0].axhline(config.defender.max_speed_horizontal, color="blue", linestyle=":", alpha=0.5,
+                    label=f"Defender $u_{{h,max}}$={config.defender.max_speed_horizontal}")
+    axes[0].axhline(config.attacker.max_speed_horizontal, color="red", linestyle=":", alpha=0.5,
+                    label=f"Attacker $u_{{h,max}}$={config.attacker.max_speed_horizontal}")
+    axes[0].set_xlabel("Time (s)", fontsize=11)
+    axes[0].set_ylabel("Speed (m/s)", fontsize=11)
+    axes[0].set_title("Component Speed Profiles", fontsize=12)
+    axes[0].legend(fontsize=9)
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(t, speed_d_3d, "b-", linewidth=2, label="Defender 3D speed")
+    axes[1].plot(t_u, speed_a_3d, "r-", linewidth=2, label="Attacker 3D speed")
+    axes[1].set_xlabel("Time (s)", fontsize=11)
+    axes[1].set_ylabel("Speed (m/s)", fontsize=11)
+    axes[1].set_title("3D Speed Magnitudes", fontsize=12)
+    axes[1].legend(fontsize=9)
+    axes[1].grid(True, alpha=0.3)
+
+    fig.suptitle("Agent Speed Profiles", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(str(output_dir / "fig_speed_profiles.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  Saved fig_speed_profiles.png")
+
+
+def fig_mode_timeline(vf_dir, output_dir, config):
+    """Analysis — Color-coded control mode timeline for horizontal and vertical sub-games."""
+    run_combined_sim = _load_numerical_sim()
+    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+
+    dt = traj["dt"]
+    n = len(traj["mode_z"])
+    t = np.arange(n) * dt
+
+    mode_colors = {0: "#e74c3c", 1: "#3498db", 2: "#2ecc71"}
+    mode_names = {0: "Reach (Phi)", 1: "Track (V_h_T)", 2: "PID"}
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 5), sharex=True)
+
+    for ax, mode_key, title in [
+        (axes[0], "mode_z", "Vertical Control Mode"),
+        (axes[1], "mode_h", "Horizontal Control Mode"),
+    ]:
+        modes = traj[mode_key]
+        for i in range(n):
+            color = mode_colors.get(int(modes[i]), "gray")
+            ax.axvspan(t[i], t[i] + dt, alpha=0.8, color=color, linewidth=0)
+        ax.set_yticks([])
+        ax.set_title(title, fontsize=12)
+        for t_val in np.diff(modes).nonzero()[0]:
+            ax.axvline(x=t[t_val + 1], color="black", linewidth=0.8, alpha=0.5)
+
+    axes[1].set_xlabel("Time (s)", fontsize=11)
+
+    legend_patches = [mpatches.Patch(color=mode_colors[k], label=f"{k}: {v}")
+                      for k, v in mode_names.items()]
+    fig.legend(handles=legend_patches, loc="upper right", fontsize=10,
+               bbox_to_anchor=(0.99, 0.95))
+
+    fig.suptitle("Control Mode Transitions Over Time", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(str(output_dir / "fig_mode_timeline.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  Saved fig_mode_timeline.png")
+
+
+def fig_altitude_phase_portrait(vf_dir, output_dir, config):
+    """Analysis — z_D vs z_A phase portrait showing altitude trajectory and capture zone."""
+    run_combined_sim = _load_numerical_sim()
+    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+
+    z_d = traj["z_d"]
+    z_a = traj["z_a"]
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    # Color trajectory by time
+    n = len(z_d)
+    colors = plt.cm.viridis(np.linspace(0, 1, n))
+    for i in range(n - 1):
+        ax.plot(z_d[i:i+2], z_a[i:i+2], color=colors[i], linewidth=1.5)
+
+    # Capture band: |z_D - z_A| <= d_z
+    z_vals = np.linspace(config.room.z_min, config.room.z_max, 200)
+    ax.fill_between(z_vals, z_vals - config.capture.d_z, z_vals + config.capture.d_z,
+                    alpha=0.2, color="green", label=f"Capture zone ($d_z={config.capture.d_z}$m)")
+    ax.plot(z_vals, z_vals, "g--", linewidth=1.5, alpha=0.6, label=r"$z_D = z_A$")
+
+    # Start and end markers
+    ax.scatter([z_d[0]], [z_a[0]], c="blue", s=120, zorder=5, marker="s", label="Start")
+    ax.scatter([z_d[-1]], [z_a[-1]], c="red", s=120, zorder=5, marker="o", label="End")
+
+    sm = plt.cm.ScalarMappable(cmap="viridis", norm=plt.Normalize(0, traj["T"]))
+    sm.set_array([])
+    plt.colorbar(sm, ax=ax, label="Time (s)")
+
+    ax.set_xlabel(r"$z_D$ (m)", fontsize=12)
+    ax.set_ylabel(r"$z_A$ (m)", fontsize=12)
+    ax.set_title("Altitude Phase Portrait", fontsize=14)
+    ax.legend(loc="upper left", fontsize=10)
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(str(output_dir / "fig_altitude_phase_portrait.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  Saved fig_altitude_phase_portrait.png")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate paper figures")
     parser.add_argument("--output-dir", default="/workspace/data/plots/paper_figures/",
@@ -520,6 +903,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     vf_dir = Path(args.vf_dir)
     config = GameConfig.from_yaml(args.config)
+    config.apply_preset(args.preset)
 
     print(f"Generating paper figures from {vf_dir}")
     print(f"Output directory: {output_dir}")
@@ -539,15 +923,25 @@ def main():
         ("Fig 4", fig4_bz_invariant_set, ["V_z_inf.npz", "B_z.npz"]),
         ("Fig 5", fig5_phi_z_slices, ["phi_z.npz"]),
         ("Fig 6", fig6_vertical_3d, ["phi_z.npz", "V_z_inf.npz"]),
-        ("Fig 7", fig7_bh_invariant_set, ["V_h_T.npz", "B_h.npz"]),
+        ("Fig 7", fig7_bh_invariant_set, ["V_h_T_6d.npz", "B_h.npz"]),
         ("Fig 8", fig8_phi_h_slices, ["phi_h.npz"]),
         ("Fig 10", fig10_winning_regions, ["phi_h.npz"]),
         ("Fig 11", fig11_simulation_trajectories, ["phi_z.npz", "V_z_inf.npz", "B_z.npz",
-                                                    "phi_h.npz", "V_h_T.npz", "B_h.npz"]),
+                                                    "phi_h.npz", "V_h_T_6d.npz"]),
         ("Fig 12", fig12_combined_3d, ["phi_z.npz", "V_z_inf.npz", "B_z.npz",
-                                       "phi_h.npz", "V_h_T.npz", "B_h.npz"]),
+                                       "phi_h.npz", "V_h_T_6d.npz"]),
         ("Attacker Reaching", fig_attacker_reaching, ["phi_A_reach.npz"]),
         ("Vertical Winning", fig_vertical_winning_regions, ["phi_z.npz"]),
+        ("Distance Over Time", fig_distance_over_time,
+         ["phi_z.npz", "V_z_inf.npz", "B_z.npz", "phi_h.npz", "V_h_T_6d.npz"]),
+        ("Control Effort", fig_control_effort,
+         ["phi_z.npz", "V_z_inf.npz", "B_z.npz", "phi_h.npz", "V_h_T_6d.npz"]),
+        ("Speed Profiles", fig_speed_profiles,
+         ["phi_z.npz", "V_z_inf.npz", "B_z.npz", "phi_h.npz", "V_h_T_6d.npz"]),
+        ("Mode Timeline", fig_mode_timeline,
+         ["phi_z.npz", "V_z_inf.npz", "B_z.npz", "phi_h.npz", "V_h_T_6d.npz"]),
+        ("Altitude Phase Portrait", fig_altitude_phase_portrait,
+         ["phi_z.npz", "V_z_inf.npz", "B_z.npz", "phi_h.npz", "V_h_T_6d.npz"]),
     ]
 
     generated = 0
@@ -555,6 +949,18 @@ def main():
         dep_missing = [d for d in deps if not (vf_dir / d).exists()]
         if dep_missing:
             print(f"  Skipping {name}: missing {dep_missing}")
+            _diagnostic_figure(
+                output_dir, FIGURE_OUTPUTS[name], f"{name} skipped",
+                f"Missing value-function artifacts: {', '.join(dep_missing)}",
+            )
+            continue
+        invalid = _invalid_paper_deps(vf_dir, deps)
+        if invalid:
+            print(f"  Skipping {name}: invalid paper artifacts {invalid}")
+            _diagnostic_figure(
+                output_dir, FIGURE_OUTPUTS[name], f"{name} skipped",
+                f"Invalid or stale paper artifacts: {', '.join(invalid)}",
+            )
             continue
         try:
             func(vf_dir, output_dir, config)

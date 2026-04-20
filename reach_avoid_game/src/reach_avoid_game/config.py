@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -36,17 +36,17 @@ class AttackerConfig:
 
 @dataclass
 class CaptureConfig:
-    d_h: float = 3.0
-    d_z: float = 1.0
+    d_h: float = 1.5
+    d_z: float = 0.5
 
 
 @dataclass
 class TargetRegionConfig:
     type: str = "box"
-    x_min: float = 38.0
+    x_min: float = 41.0
     x_max: float = 45.0
-    y_min: float = 10.0
-    y_max: float = 15.0
+    y_min: float = 11.0
+    y_max: float = 14.0
 
 
 @dataclass
@@ -122,6 +122,17 @@ class GameConfig:
     simulation: SimulationConfig = field(default_factory=SimulationConfig)
     grid_preset: str = "dev"
     grid_presets: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a plain-Python representation suitable for hashing/YAML."""
+        return asdict(self)
+
+    def to_yaml(self, path: str | Path) -> None:
+        """Save the configuration to YAML."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            yaml.safe_dump(self.to_dict(), f, sort_keys=False)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> GameConfig:

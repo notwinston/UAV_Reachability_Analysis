@@ -56,7 +56,8 @@ except ImportError:
 
 
 # Expected value function names
-VF_NAMES = ["phi_z", "V_z_inf", "B_z", "phi_h", "V_h_T", "B_h", "phi_A_reach"]
+VF_NAMES = ["phi_z", "V_z_inf", "B_z", "phi_h", "V_h_T", "V_h_T_6d", "B_h", "phi_A_reach"]
+PAPER_REQUIRED_NAMES = {"phi_z", "B_z", "phi_h", "B_h"}
 
 
 class ValueFunctionLoader:
@@ -84,6 +85,9 @@ class ValueFunctionLoader:
                 continue
             try:
                 vf = load_value_function(path)
+                if not self._artifact_is_usable(name, vf):
+                    logger.warning("Ignoring invalid value function '%s': %s", name, path)
+                    continue
                 self.vf_data[name] = vf
                 interp, spacings = self._build_interpolator(vf)
                 self.interpolators[name] = interp
@@ -91,6 +95,18 @@ class ValueFunctionLoader:
                 logger.info("Loaded value function '%s': shape=%s", name, vf.values.shape)
             except Exception:
                 logger.exception("Failed to load value function '%s'", name)
+
+    @staticmethod
+    def _artifact_is_usable(name: str, vf: ValueFunctionData) -> bool:
+        """Reject stale threshold-expanded artifacts that must be paper-valid."""
+        params = vf.params if isinstance(vf.params, dict) else {}
+        if name == "B_z" and float(params.get("d_z_effective", params.get("d_z", 1.0))) > float(params.get("d_z", 1.0)) + 1e-9:
+            return False
+        if name == "B_h" and float(params.get("d_h_effective", params.get("d_h", 3.0))) > float(params.get("d_h", 3.0)) + 1e-9:
+            return False
+        if name in PAPER_REQUIRED_NAMES and not bool(params.get("paper_valid", False)):
+            return False
+        return True
 
     @staticmethod
     def _build_interpolator(vf: ValueFunctionData):
@@ -125,6 +141,7 @@ class ValueFunctionLoader:
     def _clamp_state(self, name: str, state: np.ndarray) -> np.ndarray:
         """Clamp state to grid boundaries, logging a warning if out-of-bounds."""
         vf = self.vf_data[name]
+        state = self._coerce_state(name, state)
         grid_min = np.asarray(vf.grid_min, dtype=float)
         grid_max = np.asarray(vf.grid_max, dtype=float)
         clamped = np.clip(state, grid_min, grid_max)
@@ -133,6 +150,23 @@ class ValueFunctionLoader:
                 "State out of bounds for '%s': %s clamped to %s", name, state, clamped
             )
         return clamped
+
+    def _coerce_state(self, name: str, state: np.ndarray) -> np.ndarray:
+        """Support legacy 4D relative B_h queries against 6D B_h artifacts."""
+        vf = self.vf_data[name]
+        if name == "B_h" and vf.values.ndim == 6 and len(state) == 4:
+            x_rel, y_rel, v_x, v_y = state
+            x_mid = 0.5 * (float(vf.grid_min[0]) + float(vf.grid_max[0]))
+            y_mid = 0.5 * (float(vf.grid_min[1]) + float(vf.grid_max[1]))
+            return np.array([
+                x_mid + 0.5 * x_rel,
+                y_mid + 0.5 * y_rel,
+                v_x,
+                v_y,
+                x_mid - 0.5 * x_rel,
+                y_mid - 0.5 * y_rel,
+            ], dtype=float)
+        return state
 
     def get_value(self, vf_name: str, state: np.ndarray) -> float:
         """Interpolate value function at a given state.
@@ -164,6 +198,7 @@ class ValueFunctionLoader:
             raise KeyError(f"Value function '{vf_name}' not loaded")
 
         state = np.asarray(state, dtype=float)
+        state = self._coerce_state(vf_name, state)
         clamped = self._clamp_state(vf_name, state)
         interp = self.interpolators[vf_name]
         spacings = self._grid_spacings[vf_name]

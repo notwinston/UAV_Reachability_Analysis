@@ -53,6 +53,20 @@ def _get_display():
     return None
 
 
+def _parse_pose(context, launch_name):
+    pose = context.perform_substitution(LaunchConfiguration(launch_name))
+    parts = [float(part.strip()) for part in pose.split(',')]
+    if len(parts) != 3:
+        raise ValueError(f'{launch_name} must be formatted as x,y,z, got {pose!r}')
+    return parts
+
+
+def _ground_spawn_pose(pose):
+    grounded = list(pose)
+    grounded[2] = 0.1
+    return ','.join(str(v) for v in grounded)
+
+
 def get_px4_path():
     """Find PX4-Autopilot path from env or workspace."""
     if os.environ.get("PX4_AUTOPILOT") and os.path.isdir(os.environ["PX4_AUTOPILOT"]):
@@ -87,6 +101,18 @@ def generate_launch_description():
         'px4_dir',
         default_value=get_px4_path(),
         description='Path to PX4-Autopilot directory',
+    )
+
+    defender_pose_arg = DeclareLaunchArgument(
+        'defender_pose',
+        default_value='5.0,12.5,3.0',
+        description='Initial Gazebo pose for the defender as x,y,z',
+    )
+
+    attacker_pose_arg = DeclareLaunchArgument(
+        'attacker_pose',
+        default_value='5.0,20.0,3.0',
+        description='Initial Gazebo pose for the attacker as x,y,z',
     )
 
     # New Gazebo (gz sim / Harmonic)
@@ -198,14 +224,16 @@ def generate_launch_description():
         })
         # Do NOT set PX4_GZ_MODEL_NAME - PX4 will spawn models as x500_1, x500_2
         # Arena: 45x25m, walls at x=0,45 and y=0,25. Obstacle x=[15,20], y=[5,20]. Target x=[38,45], y=[10,15]
+        defender_pose = _parse_pose(context, 'defender_pose')
+        attacker_pose = _parse_pose(context, 'attacker_pose')
         defender_env = {
             **env,
-            'PX4_GZ_MODEL_POSE': '5.0,12.5,3.0',
+            'PX4_GZ_MODEL_POSE': _ground_spawn_pose(defender_pose),
             'PX4_UXRCE_DDS_NS': 'defender',
         }
         attacker_env = {
             **env,
-            'PX4_GZ_MODEL_POSE': '5.0,20.0,3.0',
+            'PX4_GZ_MODEL_POSE': _ground_spawn_pose(attacker_pose),
             'PX4_UXRCE_DDS_NS': 'attacker',
         }
         return [
@@ -230,42 +258,78 @@ def generate_launch_description():
 
     px4_processes = OpaqueFunction(function=add_px4_processes)
 
-    px4_adapter_defender = Node(
-        package='reach_avoid_sim',
-        executable='px4_adapter',
-        name='px4_adapter_defender',
-        parameters=[{
-            'vehicle_id': 1,
-            'cmd_vel_topic': '/defender/cmd_vel',
-            'fmu_topic_prefix': 'defender',
-        }],
-        output='screen',
-    )
+    def _adapter_params(vehicle_id, topic, prefix, spawn):
+        return {
+            'vehicle_id': vehicle_id,
+            'cmd_vel_topic': topic,
+            'state_topic': '/defender/state' if prefix == 'defender' else '/attacker/state',
+            'fmu_topic_prefix': prefix,
+            'spawn_x': spawn[0],
+            'spawn_y': spawn[1],
+            'spawn_z': 0.1,
+            'target_altitude': spawn[2],
+            'room_x_min': 0.0,
+            'room_x_max': 45.0,
+            'room_y_min': 0.0,
+            'room_y_max': 25.0,
+            'room_z_min': 0.5,
+            'room_z_max': 20.0,
+            'obstacle_x_min': 15.0,
+            'obstacle_x_max': 20.0,
+            'obstacle_y_min': 5.0,
+            'obstacle_y_max': 20.0,
+            'safety_margin': 4.0,
+            'obstacle_margin': 4.0,
+            'safety_lookahead': 2.0,
+            'command_filter_alpha': 0.35,
+            'max_accel_horizontal': 0.6,
+            'max_accel_vertical': 0.6,
+            'max_speed_horizontal': 1.5,
+            'max_speed_vertical': 0.6,
+            'altitude_hold_gain': 0.8,
+        }
 
-    px4_adapter_attacker = Node(
-        package='reach_avoid_sim',
-        executable='px4_adapter',
-        name='px4_adapter_attacker',
-        parameters=[{
-            'vehicle_id': 2,
-            'cmd_vel_topic': '/attacker/cmd_vel',
-            'fmu_topic_prefix': 'attacker',
-        }],
-        output='screen',
-    )
+    def add_px4_adapter_nodes(context):
+        defender_spawn = _parse_pose(context, 'defender_pose')
+        attacker_spawn = _parse_pose(context, 'attacker_pose')
+        return [
+            Node(
+                package='reach_avoid_sim',
+                executable='px4_adapter',
+                name='px4_adapter_defender',
+                parameters=[_adapter_params(1, '/defender/cmd_vel', 'defender', defender_spawn)],
+                output='screen',
+            ),
+            Node(
+                package='reach_avoid_sim',
+                executable='px4_adapter',
+                name='px4_adapter_attacker',
+                parameters=[_adapter_params(2, '/attacker/cmd_vel', 'attacker', attacker_spawn)],
+                output='screen',
+            ),
+        ]
 
-    ground_truth_relay = Node(
-        package='reach_avoid_sim',
-        executable='ground_truth_relay',
-        name='ground_truth_relay',
-        parameters=[{
-            'defender_model_name': 'x500_1',
-            'attacker_model_name': 'x500_2',
-            'world_name': 'reach_avoid_arena',
-            'publish_rate': 50.0,
-        }],
-        output='screen',
-    )
+    def add_ground_truth_relay(context):
+        defender_spawn = _parse_pose(context, 'defender_pose')
+        attacker_spawn = _parse_pose(context, 'attacker_pose')
+        return [Node(
+            package='reach_avoid_sim',
+            executable='ground_truth_relay',
+            name='ground_truth_relay',
+            parameters=[{
+                'defender_model_name': 'x500_1',
+                'attacker_model_name': 'x500_2',
+                'world_name': 'reach_avoid_arena',
+                'publish_rate': 50.0,
+                'defender_spawn_x': defender_spawn[0],
+                'defender_spawn_y': defender_spawn[1],
+                'defender_spawn_z': 0.1,
+                'attacker_spawn_x': attacker_spawn[0],
+                'attacker_spawn_y': attacker_spawn[1],
+                'attacker_spawn_z': 0.1,
+            }],
+            output='screen',
+        )]
 
     # Attacker waypoints: flat list [x1,y1,z1, x2,y2,z2, ...] navigating around
     # the obstacle (x=[15,20], y=[5,20]) by going below y=5.
@@ -279,6 +343,7 @@ def generate_launch_description():
     ]
 
     vf_default = _find_path([
+        '/workspaces/UAV_Reachability_Analysis/data/value_functions',
         os.path.join(os.path.expanduser('~'), 'ws', 'data', 'value_functions'),
         '/workspace/data/value_functions',
     ], '/workspace/data/value_functions')
@@ -297,6 +362,22 @@ def generate_launch_description():
             'waypoints': attacker_waypoints,
             'value_function_dir': vf_default,
             'target_altitude': 10.0,
+            'room_x_min': 0.0,
+            'room_x_max': 45.0,
+            'room_y_min': 0.0,
+            'room_y_max': 25.0,
+            'room_z_min': 0.5,
+            'room_z_max': 20.0,
+            'obstacle_x_min': 15.0,
+            'obstacle_x_max': 20.0,
+            'obstacle_y_min': 5.0,
+            'obstacle_y_max': 20.0,
+            'safety_margin': 1.5,
+            'obstacle_margin': 3.0,
+            'safety_lookahead': 1.0,
+            'command_filter_alpha': 0.35,
+            'max_accel_horizontal': 1.0,
+            'max_accel_vertical': 1.0,
         }],
         output='screen',
     )
@@ -307,9 +388,8 @@ def generate_launch_description():
     delayed_controllers = TimerAction(
         period=18.0,
         actions=[
-            px4_adapter_defender,
-            px4_adapter_attacker,
-            ground_truth_relay,
+            OpaqueFunction(function=add_px4_adapter_nodes),
+            OpaqueFunction(function=add_ground_truth_relay),
             attacker_controller,
         ],
     )
@@ -335,6 +415,8 @@ def generate_launch_description():
         attacker_mode_arg,
         world_file_arg,
         px4_dir_arg,
+        defender_pose_arg,
+        attacker_pose_arg,
         cleanup,
         gazebo,
         gz_bridge,

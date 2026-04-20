@@ -2,6 +2,7 @@
 
 import sys
 import os
+from pathlib import Path
 import numpy as np
 import pytest
 
@@ -11,7 +12,8 @@ sys.path.insert(0, "/workspace/reach_avoid_game/src")
 
 from reach_avoid_controller.value_function_loader import ValueFunctionLoader, VF_NAMES
 
-VF_DIR = "/workspace/data/value_functions/"
+REPO_ROOT = Path(__file__).resolve().parents[4]
+VF_DIR = str(REPO_ROOT / "data" / "value_functions")
 
 
 @pytest.fixture(scope="module")

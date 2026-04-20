@@ -8,6 +8,9 @@ from scipy.interpolate import RegularGridInterpolator
 from reach_avoid_game.solvers.value_function_io import ValueFunctionData
 
 
+DEFAULT_GRADIENT_DEADBAND = 1e-6
+
+
 def _build_interpolator(vf_data: ValueFunctionData) -> RegularGridInterpolator:
     """Build a RegularGridInterpolator from a value function."""
     ndim = vf_data.values.ndim
@@ -80,6 +83,7 @@ def extract_optimal_control_vertical(
     state: np.ndarray,
     k_z: float,
     u_d_z: float,
+    gradient_deadband: float = DEFAULT_GRADIENT_DEADBAND,
 ) -> float:
     """Extract optimal vertical control from value function gradient.
 
@@ -102,6 +106,16 @@ def extract_optimal_control_vertical(
 
     # Defender minimizes the value.
     direction = grad[v_idx] * k_z
+    if abs(direction) < gradient_deadband:
+        if len(state) == 3:
+            z_error = float(state[2] - state[0])
+            if abs(z_error) >= gradient_deadband:
+                return u_d_z if z_error > 0 else -u_d_z
+        elif len(state) == 2:
+            z_rel = float(state[0])
+            if abs(z_rel) >= gradient_deadband:
+                return -u_d_z if z_rel > 0 else u_d_z
+        return 0.0
     if direction > 0:
         return -u_d_z
     else:
@@ -112,6 +126,7 @@ def extract_optimal_disturbance_vertical(
     vf_data: ValueFunctionData,
     state: np.ndarray,
     u_a_z: float,
+    gradient_deadband: float = DEFAULT_GRADIENT_DEADBAND,
 ) -> float:
     """Extract optimal attacker disturbance from value function gradient.
 
@@ -134,6 +149,8 @@ def extract_optimal_disturbance_vertical(
     if len(state) == 3:
         # 3D game: attacker maximizes the value.
         direction = grad[2]
+        if abs(direction) < gradient_deadband:
+            return 0.0
         if direction > 0:
             return u_a_z
         else:
@@ -143,6 +160,8 @@ def extract_optimal_disturbance_vertical(
         # So attacker direction = grad @ [-1, 0] = -grad[0]
         # Attacker maximizes → d_z = U_A_z * sign(-grad[0])
         direction = -grad[0]
+        if abs(direction) < gradient_deadband:
+            return 0.0
         if direction >= 0:
             return u_a_z
         else:
@@ -157,12 +176,9 @@ def is_deep_inside_invariant_set(
 ) -> bool:
     """Check if state is deep inside the invariant set B_z.
 
-    "Deep inside" means value_function(state) < -margin where
-    margin = margin_fraction * d_z.
-
-    For V_z_inf initialized as |z_rel| - d_z:
-    - value <= 0 means inside B_z
-    - value < -margin means deep inside
+    ``d_z`` is the threshold used to define the invariant set. For the
+    current distance-like value functions, inside means ``value <= d_z`` and
+    deep inside means ``value < d_z * (1 - margin_fraction)``.
 
     Args:
         vf_data: V_z_inf value function data
@@ -174,5 +190,4 @@ def is_deep_inside_invariant_set(
         True if deep inside B_z
     """
     value = interpolate_value(vf_data, state)
-    margin = margin_fraction * d_z
-    return value < -margin
+    return value < d_z * (1.0 - margin_fraction)

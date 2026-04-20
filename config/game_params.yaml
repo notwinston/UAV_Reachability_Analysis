@@ -15,14 +15,14 @@ attacker:
   max_speed_horizontal: 3.0
   max_speed_vertical: 2.0
 capture:
-  d_h: 3.0
-  d_z: 1.0
+  d_h: 1.5
+  d_z: 0.5
 target_region:
   type: box
-  x_min: 38.0
+  x_min: 41.0
   x_max: 45.0
-  y_min: 10.0
-  y_max: 15.0
+  y_min: 11.0
+  y_max: 14.0
 obstacles:
   - type: box
     x_min: 15.0

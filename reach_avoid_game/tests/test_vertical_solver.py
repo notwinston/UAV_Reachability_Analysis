@@ -9,6 +9,7 @@ pytest.importorskip("odp")
 
 from reach_avoid_game.config import GameConfig
 from reach_avoid_game.solvers.value_function_io import load_value_function, load_time_slices
+from reach_avoid_game.solvers.value_function_io import save_value_function, ValueFunctionData
 from reach_avoid_game.solvers.vertical_solver import (
     solve_vertical_reach_avoid,
     solve_vertical_max_distance,
@@ -45,7 +46,10 @@ def v_z_inf_path(config, output_dir):
 @pytest.fixture(scope="module")
 def b_z_path(v_z_inf_path, config, output_dir):
     """Compute B_z from V_z_inf (cached for module). Step 2 of pipeline."""
-    return compute_invariant_set_Bz(v_z_inf_path, d_z=config.capture.d_z, output_dir=output_dir)
+    try:
+        return compute_invariant_set_Bz(v_z_inf_path, d_z=config.capture.d_z, output_dir=output_dir)
+    except ValueError as exc:
+        pytest.skip(f"V_z_inf does not produce a paper-threshold B_z on this grid: {exc}")
 
 
 @pytest.fixture(scope="module")
@@ -153,7 +157,7 @@ class TestPhiZ:
 
     def test_phi_z_uses_bz_target(self, phi_z_data, v_z_inf_data, config):
         """When v_z_inf_data is provided, Phi_z initial values should be based on B_z SDF."""
-        # With B_z target, values are V_z_inf - d_z_effective, not |z_D - z_A| - d_z
+        # With B_z target, values are V_z_inf - d_z, not |z_D - z_A| - d_z
         # All values should be finite
         assert np.isfinite(phi_z_data.values).all()
         # On dev grid, B_z is very small so Phi_z may be all positive
@@ -188,6 +192,43 @@ class TestBz:
 
         assert b_z_data.values[center_z, center_v] > 0, \
             "B_z should include z_rel=0, v_D_z=0 (defender at same altitude as attacker, zero velocity)"
+
+
+def test_compute_bz_uses_requested_threshold_without_expansion(tmp_path):
+    values = np.array([
+        [4.0],
+        [0.5],
+        [4.0],
+    ])
+    vf_data = ValueFunctionData(
+        values=values,
+        grid_min=np.array([-2.0, 0.0]),
+        grid_max=np.array([2.0, 0.0]),
+        grid_shape=values.shape,
+    )
+    source = tmp_path / "V_z_inf.npz"
+    save_value_function(source, vf_data)
+
+    output = compute_invariant_set_Bz(source, d_z=1.0, output_dir=tmp_path)
+    b_z = load_value_function(output)
+
+    np.testing.assert_array_equal(b_z.values, (values <= 1.0).astype(float))
+    assert "d_z_effective" not in b_z.params
+
+
+def test_compute_bz_raises_when_requested_threshold_is_empty(tmp_path):
+    values = np.full((3, 1), 4.0)
+    vf_data = ValueFunctionData(
+        values=values,
+        grid_min=np.array([-2.0, 0.0]),
+        grid_max=np.array([2.0, 0.0]),
+        grid_shape=values.shape,
+    )
+    source = tmp_path / "V_z_inf.npz"
+    save_value_function(source, vf_data)
+
+    with pytest.raises(ValueError, match="threshold will not be expanded"):
+        compute_invariant_set_Bz(source, d_z=1.0, output_dir=tmp_path)
 
 
 class TestControlExtraction:

@@ -3,6 +3,7 @@
 import sys
 import os
 import math
+from pathlib import Path
 import numpy as np
 import pytest
 
@@ -12,7 +13,8 @@ sys.path.insert(0, "/workspace/reach_avoid_game/src")
 from reach_avoid_controller.value_function_loader import ValueFunctionLoader
 from reach_avoid_controller.defender_node import DefenderControlLogic
 
-VF_DIR = "/workspace/data/value_functions/"
+REPO_ROOT = Path(__file__).resolve().parents[4]
+VF_DIR = str(REPO_ROOT / "data" / "value_functions")
 
 
 @pytest.fixture(scope="module")
@@ -72,8 +74,8 @@ class TestModeTransitions:
         d_vel = np.array([0.0, 0.0, 0.0])
         a_pos = np.array([10.1, 10.1, 10.0])
         _, status = logic.compute_control(d_pos, d_vel, a_pos)
-        # z_rel = 0 -> inside B_z -> should be pid_deep or tracking
-        assert status["z_mode"] in ("pid_deep", "tracking", "pid_fallback")
+        # Current checked-in B_z may be rejected if it was threshold-expanded.
+        assert status["z_mode"] in ("pid_deep", "tracking", "pid_fallback", "pid_invalid_bz")
 
     def test_reaching_when_far(self, logic):
         """When defender is far from attacker, should be in reaching mode."""
@@ -82,11 +84,14 @@ class TestModeTransitions:
         a_pos = np.array([30.0, 20.0, 15.0])
         _, status = logic.compute_control(d_pos, d_vel, a_pos)
         # Far apart -> outside B_z and B_h -> reaching or pid_pursuit (if outside winning region)
-        assert status["z_mode"] in ("reaching", "pid_fallback", "pid_pursuit")
-        assert status["h_mode"] in ("reaching", "pid_fallback", "pid_pursuit")
+        assert status["z_mode"] in ("reaching", "pid_fallback", "pid_pursuit", "pid_invalid_bz")
+        assert status["h_mode"] in ("reaching", "pid_fallback", "pid_pursuit", "pid_invalid_bh")
 
     def test_mode_is_valid_string(self, logic):
-        valid_modes = {"reaching", "tracking", "pid_deep", "pid_fallback", "pid_pursuit"}
+        valid_modes = {
+            "reaching", "tracking", "pid_deep", "pid_fallback", "pid_pursuit",
+            "pid_invalid_bz", "pid_invalid_bh",
+        }
         d_pos = np.array([10.0, 10.0, 10.0])
         d_vel = np.array([1.0, -1.0, 0.5])
         a_pos = np.array([12.0, 8.0, 11.0])
@@ -129,22 +134,52 @@ class TestSafeFallback:
         assert cmd.shape == (3,)
         assert np.all(np.isfinite(cmd))
         assert status["z_mode"] == "pid_fallback"
-        assert status["h_mode"] == "pid_fallback"
+        assert status["h_mode"] == "pid_invalid_bh"
+
+
+class _FakeVF:
+    def __init__(self, values):
+        self.values = np.asarray(values, dtype=float)
 
 
 class _FakeLoader:
-    def __init__(self, phi_h_value=1.0, b_h_value=0.0, phi_z_value=-1.0):
-        self.loaded_names = {"phi_h", "B_h", "phi_z", "B_z", "V_z_inf", "V_h_T"}
+    def __init__(
+        self,
+        phi_h_value=1.0,
+        b_h_value=0.0,
+        phi_z_value=-1.0,
+        b_z_effective=1.0,
+        b_h_effective=3.0,
+        v_h_6d_values=(0.0, 10.0),
+        zero_gradients=False,
+    ):
+        self.loaded_names = {"phi_h", "B_h", "phi_z", "B_z", "V_z_inf", "V_h_T", "V_h_T_6d"}
         self.phi_h_value = phi_h_value
         self.b_h_value = b_h_value
         self.phi_z_value = phi_z_value
+        self.b_z_effective = b_z_effective
+        self.b_h_effective = b_h_effective
+        self.zero_gradients = zero_gradients
+        self.vf_data = {
+            "B_z": _FakeVF([1.0]),
+            "B_h": _FakeVF([1.0]),
+            "V_h_T_6d": _FakeVF(np.reshape(np.asarray(v_h_6d_values, dtype=float), (1, 1, 1, 1, 1, -1))),
+        }
 
     def get_params(self, name):
         params = {
             "phi_z": {"d_z": 1.0, "k_z": 1.5, "U_D_z": 4.0, "U_A_z": 2.0},
             "phi_h": {"d_h": 3.0, "k_x": 0.7, "k_y": 0.7, "U_D_h": 6.0, "U_A_h": 3.0},
-            "B_z": {"d_z_effective": 1.0},
-            "B_h": {"d_h_effective": 3.0},
+            "B_z": {
+                "d_z_effective": self.b_z_effective,
+                "paper_valid": True,
+                "subset_valid": True,
+            },
+            "B_h": {
+                "d_h_effective": self.b_h_effective,
+                "paper_valid": True,
+                "subset_valid": True,
+            },
         }
         return params.get(name, {})
 
@@ -157,15 +192,22 @@ class _FakeLoader:
             return self.phi_z_value
         if name == "B_z":
             return 0.0
+        if name == "V_h_T_6d":
+            return 10.0
         if name in {"V_z_inf", "V_h_T"}:
             return 10.0
         return 0.0
 
     def get_gradient(self, name, state):
+        if self.zero_gradients:
+            sizes = {"phi_h": 6, "phi_z": 3, "V_h_T": 4, "V_h_T_6d": 6, "V_z_inf": 2}
+            return np.zeros(sizes.get(name, 1))
         if name == "phi_h":
             return np.array([0.0, 0.0, 1.0, -1.0, 0.0, 0.0])
         if name == "phi_z":
             return np.array([0.0, 1.0, 0.0])
+        if name == "V_h_T_6d":
+            return np.array([0.0, 0.0, 1.0, -1.0, 0.0, 0.0])
         if name == "V_h_T":
             return np.array([0.0, 0.0, 1.0, -1.0])
         if name == "V_z_inf":
@@ -205,10 +247,59 @@ class TestCorrectedConventions:
         assert positive_mode == "reaching"
         assert negative_mode == "pid_pursuit"
 
+    def test_anti_closing_horizontal_reaching_falls_back_to_pursuit(self):
+        state = np.array([10.0, -10.0, 0.0, 0.0, 0.0, 0.0])
+        logic = DefenderControlLogic(_FakeLoader(phi_h_value=1.0, b_h_value=0.0))
+
+        u_x, u_y, mode = logic._horizontal_reach_track(
+            state, 10.0, -10.0, 0.0, 0.0, 0.0, 0.0, 10.0, -10.0,
+        )
+
+        assert mode == "pid_pursuit"
+        assert 10.0 * u_x + -10.0 * u_y < 0.0
+
+    def test_anti_closing_vertical_reaching_falls_back_to_pursuit(self):
+        logic = DefenderControlLogic(_FakeLoader(phi_z_value=-1.0))
+
+        u_z, mode = logic._vertical_reach_track(
+            np.array([5.0, 0.0, 10.0]), -5.0, 0.0, 10.0, 5.0,
+        )
+
+        assert mode == "pid_pursuit"
+        assert u_z > 0.0
+
     def test_vertical_reaching_uses_defender_minimizing_sign(self):
         logic = DefenderControlLogic(_FakeLoader())
 
         assert logic._optimal_reaching_vertical(np.array([10.0, 0.0, 12.0])) == -logic.U_D_z
+
+    def test_expanded_threshold_metadata_rejects_bz(self):
+        logic = DefenderControlLogic(_FakeLoader(b_z_effective=3.6))
+        _, mode = logic._vertical_reach_track(
+            np.array([10.0, 0.0, 10.0]), 0.0, 0.0, 10.0, 10.0,
+        )
+
+        assert mode == "pid_invalid_bz"
+
+    def test_4d_horizontal_tracking_does_not_enable_algorithm2(self):
+        loader = _FakeLoader(v_h_6d_values=(4.0, 10.0))
+        loader.loaded_names.remove("V_h_T_6d")
+        logic = DefenderControlLogic(loader)
+        _, _, mode = logic._horizontal_reach_track(
+            np.zeros(6), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        )
+
+        assert mode == "pid_invalid_bh"
+
+    def test_zero_gradient_vertical_tracking_returns_zero(self):
+        logic = DefenderControlLogic(_FakeLoader(zero_gradients=True))
+
+        assert logic._optimal_tracking_vertical(np.array([0.0, 0.0])) == 0.0
+
+    def test_zero_gradient_horizontal_tracking_returns_zero(self):
+        logic = DefenderControlLogic(_FakeLoader(zero_gradients=True))
+
+        assert logic._optimal_tracking_horizontal(np.zeros(6)) == (0.0, 0.0)
 
 
 class TestWallAvoidance:

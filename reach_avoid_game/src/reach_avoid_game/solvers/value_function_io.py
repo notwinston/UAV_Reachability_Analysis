@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 import sys
 from typing import Any
@@ -19,6 +22,54 @@ class ValueFunctionData:
     grid_shape: tuple[int, ...]
     params: dict[str, Any] = field(default_factory=dict)
     description: str = ""
+
+
+def stable_config_hash(config: Any) -> str:
+    """Return a stable short hash for a config-like object."""
+    if hasattr(config, "to_dict"):
+        payload = config.to_dict()
+    elif isinstance(config, dict):
+        payload = config
+    else:
+        payload = repr(config)
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def standard_metadata(
+    config: Any,
+    *,
+    artifact: str,
+    grid_preset: str | None = None,
+    paper_valid: bool = False,
+    subset_valid: bool | None = None,
+    source_artifact: str | None = None,
+    calibration: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Metadata common to generated value-function artifacts."""
+    metadata: dict[str, Any] = {
+        "artifact": artifact,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "config_hash": stable_config_hash(config),
+        "grid_preset": grid_preset or getattr(config, "grid_preset", None),
+        "paper_valid": bool(paper_valid),
+    }
+    if subset_valid is not None:
+        metadata["subset_valid"] = bool(subset_valid)
+    if source_artifact is not None:
+        metadata["source_artifact"] = source_artifact
+    if calibration:
+        metadata["calibration"] = calibration
+    if extra:
+        metadata.update(extra)
+    return metadata
+
+
+def is_paper_valid(vf_data: ValueFunctionData) -> bool:
+    """Return whether a loaded artifact declares itself paper-valid."""
+    params = vf_data.params if isinstance(vf_data.params, dict) else {}
+    return bool(params.get("paper_valid", False))
 
 
 def save_value_function(path: str | Path, data: ValueFunctionData) -> None:

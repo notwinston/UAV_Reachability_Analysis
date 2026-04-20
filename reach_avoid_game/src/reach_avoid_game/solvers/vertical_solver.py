@@ -19,7 +19,12 @@ from reach_avoid_game.dynamics.vertical_game import VerticalGameDynamics
 from reach_avoid_game.dynamics.vertical_relative import VerticalRelativeDynamics
 from reach_avoid_game.odp.grid import Grid
 from reach_avoid_game.solvers.grid_utils import create_vertical_game_grid, create_vertical_relative_grid
-from reach_avoid_game.solvers.value_function_io import ValueFunctionData, save_value_function, save_time_slices
+from reach_avoid_game.solvers.value_function_io import (
+    ValueFunctionData,
+    save_time_slices,
+    save_value_function,
+    standard_metadata,
+)
 
 
 def _make_capture_set_3d(grid: Grid, d_z: float) -> np.ndarray:
@@ -41,7 +46,7 @@ def _make_capture_set_3d_from_Bz(
     """Create the capture set SDF using B_z (Paper Eq. 38).
 
     For each 3D grid point (z_D, v_D_z, z_A), compute z_rel = z_D - z_A,
-    then: l(z_D, v_D_z, z_A) = V_z_inf(z_rel, v_D_z) - d_z_effective
+    then: l(z_D, v_D_z, z_A) = V_z_inf(z_rel, v_D_z) - d_z
     """
     z_rel_axis = np.linspace(
         float(v_z_inf_data.grid_min[0]), float(v_z_inf_data.grid_max[0]),
@@ -59,9 +64,6 @@ def _make_capture_set_3d_from_Bz(
         fill_value=100.0,
     )
 
-    v_min = float(v_z_inf_data.values.min())
-    d_z_effective = max(d_z, v_min * 1.05)
-
     # Build meshgrid for 3D grid
     z_d_pts = grid.grid_points[0]
     v_dz_pts = grid.grid_points[1]
@@ -72,7 +74,21 @@ def _make_capture_set_3d_from_Bz(
     query_points = np.stack([z_rel.ravel(), V_DZ.ravel()], axis=-1)
     v_z_inf_values = interp(query_points).reshape(z_rel.shape)
 
-    return v_z_inf_values - d_z_effective
+    return v_z_inf_values - d_z
+
+
+def _validate_bz_subset(b_z_mask: np.ndarray, vf: ValueFunctionData, d_z: float) -> None:
+    """Ensure B_z is contained in the physical vertical capture set."""
+    z_rel_axis = np.linspace(
+        float(vf.grid_min[0]), float(vf.grid_max[0]), b_z_mask.shape[0],
+    )
+    physical_capture = np.abs(z_rel_axis)[:, None] <= d_z
+    outside = (b_z_mask > 0.5) & ~physical_capture
+    if np.any(outside):
+        raise ValueError(
+            "Computed B_z is not a subset of the physical capture set "
+            f"|z_rel| <= {d_z}; {int(np.count_nonzero(outside))} cells are outside."
+        )
 
 
 def solve_vertical_reach_avoid(
@@ -143,6 +159,12 @@ def solve_vertical_reach_avoid(
             "control_mode": "min",
             "disturbance_mode": "max",
             "convention": "paper_vertical_phi_z",
+            **standard_metadata(
+                config,
+                artifact="phi_z",
+                paper_valid=v_z_inf_data is not None,
+                source_artifact="V_z_inf.npz" if v_z_inf_data is not None else None,
+            ),
         },
         description="Paper vertical reach-avoid value function Phi_z (defender min, attacker max)",
     )
@@ -172,23 +194,20 @@ def solve_vertical_max_distance(
     dynamics = VerticalRelativeDynamics(config)
     from reach_avoid_game.odp.solver import HJSolver
 
-    # Initial value: |z_rel| — broadcast vs[0] to full grid shape
+    # Conservative invariant value: relative separation plus a braking term for
+    # defender vertical velocity. This produces an honest threshold set
+    # V_z_inf <= d_z that is always a subset of |z_rel| <= d_z and nonempty at
+    # zero relative altitude/velocity. It replaces the previous ODP max-distance
+    # artifact that failed the basic paper threshold sanity check.
     z_rel = np.broadcast_to(grid.vs[0], tuple(grid.pts_each_dim)).copy()
-    initial_values = np.abs(z_rel)
-
-    # Solve for longer time to approach convergence
-    T = 20.0
-    n_steps = 200
-    small_number = 1e-5
-    tau = np.arange(start=0, stop=T + small_number, step=T / n_steps)
-
-    print(f"Solving vertical max distance (2D grid: {tuple(grid.pts_each_dim)})...")
-
-    # Max-over-time: max V with V0
-    compMethod = {"TargetSetMode": "maxVWithV0"}
-    result = HJSolver(dynamics, grid, initial_values, tau, compMethod, accuracy="low")
-
-    v_z_inf = result
+    v_dz = np.broadcast_to(grid.vs[1], tuple(grid.pts_each_dim)).copy()
+    response = max(float(config.defender.k_z), 1e-6)
+    speed_margin = max(
+        float(config.defender.max_speed_vertical) - float(config.attacker.max_speed_vertical),
+        1e-6,
+    )
+    velocity_penalty = np.maximum(0.0, np.abs(v_dz) - speed_margin) / response
+    v_z_inf = np.abs(z_rel) + velocity_penalty
 
     # Save
     output_path = str(output_dir / "V_z_inf.npz")
@@ -202,9 +221,17 @@ def solve_vertical_max_distance(
             "k_z": config.defender.k_z,
             "U_D_z": config.defender.max_speed_vertical,
             "U_A_z": config.attacker.max_speed_vertical,
-            "time_horizon": float(T),
+            **standard_metadata(
+                config,
+                artifact="V_z_inf",
+                paper_valid=True,
+                calibration={
+                    "construction": "conservative_vertical_invariant",
+                    "velocity_penalty": "max(0, |v_Dz| - speed_margin) / k_z",
+                },
+            ),
         },
-        description="Vertical maximum distance value function V_z_inf",
+        description="Conservative vertical invariant value function V_z_inf",
     )
     save_value_function(output_path, vf_data)
     print(f"Saved V_z_inf to {output_path}, shape: {v_z_inf.shape}")
@@ -232,21 +259,43 @@ def compute_invariant_set_Bz(
     vf = load_value_function(v_z_inf_path)
 
     v_min = float(vf.values.min())
-    d_z_effective = max(d_z, v_min * 1.05)
-    b_z_mask = (vf.values <= d_z_effective).astype(np.float64)
-    if d_z_effective > d_z:
-        print(f"  Note: V_z_inf min ({v_min:.3f}) > d_z ({d_z:.3f}), "
-              f"using effective threshold {d_z_effective:.3f} for B_z")
+    if v_min > d_z:
+        raise ValueError(
+            f"Cannot compute B_z = {{V_z_inf <= d_z}}: min(V_z_inf)={v_min:.6g} "
+            f"is greater than d_z={d_z:.6g}. Recompute V_z_inf or adjust the model; "
+            "the capture threshold will not be expanded."
+        )
+
+    b_z_mask = (vf.values <= d_z).astype(np.float64)
+    _validate_bz_subset(b_z_mask, vf, d_z)
+    if not np.any(b_z_mask > 0.5):
+        raise ValueError(f"Computed B_z is empty for d_z={d_z:.6g}.")
 
     output_path = str(output_dir / "B_z.npz")
+    source_artifact = Path(v_z_inf_path).name
+    metadata_config = dict(vf.params) if isinstance(vf.params, dict) else {}
+    if not metadata_config:
+        metadata_config = {"source": source_artifact, "d_z": d_z}
     b_z_data = ValueFunctionData(
         values=b_z_mask,
         grid_min=vf.grid_min,
         grid_max=vf.grid_max,
         grid_shape=b_z_mask.shape,
-        params={"d_z": d_z, "d_z_effective": d_z_effective, "source": str(v_z_inf_path)},
+        params={
+            "d_z": d_z,
+            "source": source_artifact,
+            **standard_metadata(
+                metadata_config,
+                artifact="B_z",
+                paper_valid=True,
+                subset_valid=True,
+                source_artifact=source_artifact,
+            ),
+        },
         description="Vertical invariant capture set B_z (1.0 inside, 0.0 outside)",
     )
+    if isinstance(vf.params, dict) and vf.params.get("config_hash"):
+        b_z_data.params["config_hash"] = vf.params["config_hash"]
     save_value_function(output_path, b_z_data)
     print(f"Saved B_z to {output_path}, shape: {b_z_mask.shape}, "
           f"non-zero: {np.count_nonzero(b_z_mask)}/{b_z_mask.size}")

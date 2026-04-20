@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'game_viz = reach_avoid_viz.game_viz_node:main',
+            'trajectory_recorder = reach_avoid_viz.trajectory_recorder_node:main',
         ],
     },
 )

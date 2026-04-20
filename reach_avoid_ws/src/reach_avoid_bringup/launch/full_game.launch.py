@@ -32,12 +32,15 @@ def generate_launch_description():
 
     # Discover value_function_dir and game_params_file across common locations
     vf_default = _find_path([
+        '/workspaces/UAV_Reachability_Analysis/data/value_functions',
         os.path.join(os.path.expanduser('~'), 'ws', 'data', 'value_functions'),
         '/workspace/data/value_functions',
         '/workspaces/ros2_ws/src/UAV_Reachability_Analysis/value_functions',
     ], '/workspace/data/value_functions')
 
     gp_default = _find_path([
+        '/workspaces/UAV_Reachability_Analysis/config/generated_calibrated_game_params.yaml',
+        '/workspaces/UAV_Reachability_Analysis/config/game_params.yaml',
         os.path.join(os.path.expanduser('~'), 'ws', 'config', 'game_params.yaml'),
         '/workspace/config/game_params.yaml',
         '/workspaces/ros2_ws/src/UAV_Reachability_Analysis/config/game_params.yaml',
@@ -62,6 +65,24 @@ def generate_launch_description():
         description='Path to game_params.yaml',
     )
 
+    px4_dir_arg = DeclareLaunchArgument(
+        'px4_dir',
+        default_value='/opt/PX4-Autopilot',
+        description='Path to PX4-Autopilot directory',
+    )
+
+    defender_pose_arg = DeclareLaunchArgument(
+        'defender_pose',
+        default_value='5.0,12.5,3.0',
+        description='Initial Gazebo pose for the defender as x,y,z',
+    )
+
+    attacker_pose_arg = DeclareLaunchArgument(
+        'attacker_pose',
+        default_value='5.0,20.0,3.0',
+        description='Initial Gazebo pose for the attacker as x,y,z',
+    )
+
     # Include simulation.launch.py
     simulation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -69,6 +90,9 @@ def generate_launch_description():
         ),
         launch_arguments={
             'attacker_mode': LaunchConfiguration('attacker_mode'),
+            'px4_dir': LaunchConfiguration('px4_dir'),
+            'defender_pose': LaunchConfiguration('defender_pose'),
+            'attacker_pose': LaunchConfiguration('attacker_pose'),
         }.items(),
     )
 
@@ -99,10 +123,13 @@ def generate_launch_description():
         parameters=[{
             'value_function_dir': LaunchConfiguration('value_function_dir'),
             'control_rate': 50.0,
-            'pid_gain_z': 2.0,
+            'pid_gain_z': 8.0,
             'pid_gain_h': 2.0,
             'margin_z_factor': 0.3,
             'margin_h_factor': 0.3,
+            'command_filter_alpha': 0.35,
+            'max_accel_horizontal': 1.0,
+            'max_accel_vertical': 1.0,
         }],
         additional_env=defender_env,
         output='screen',
@@ -118,6 +145,19 @@ def generate_launch_description():
         name='game_viz',
         parameters=[{
             'game_params_file': LaunchConfiguration('game_params_file'),
+        }],
+        output='screen',
+    )
+
+    trajectory_recorder = Node(
+        package='reach_avoid_viz',
+        executable='trajectory_recorder',
+        name='trajectory_recorder',
+        parameters=[{
+            'game_params_file': LaunchConfiguration('game_params_file'),
+            'output_dir': '/workspaces/UAV_Reachability_Analysis/data/plots/gazebo_runs',
+            'sample_stride': 2,
+            'autosave_period_sec': 10.0,
         }],
         output='screen',
     )
@@ -138,9 +178,13 @@ def generate_launch_description():
         attacker_mode_arg,
         value_function_dir_arg,
         game_params_arg,
+        px4_dir_arg,
+        defender_pose_arg,
+        attacker_pose_arg,
         simulation_launch,
         static_tf,
         delayed_defender,
         game_viz,
+        trajectory_recorder,
         rviz,
     ])

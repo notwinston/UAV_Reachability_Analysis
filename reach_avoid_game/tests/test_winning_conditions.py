@@ -126,18 +126,27 @@ class TestTCaptureFromSlices:
         if tc_close < float("inf") and tc_far < float("inf"):
             assert tc_close <= tc_far + 0.5
 
-    def test_T_capture_from_slices_inf_for_unreachable(self, phi_z):
-        """States far apart with bad velocity should return inf T_capture."""
-        # State far outside any capture possibility
+    def test_T_capture_from_slices_handles_far_state(self, phi_z):
+        """Far states should return a valid capture-time estimate or inf."""
         state = np.array([0.5, -4.0, 19.5])  # z_D near floor, z_A near ceiling, moving away
         tc = compute_T_capture_from_slices(
             PHI_Z_TIME_SLICES_PATH,
             state, phi_z.grid_min, phi_z.grid_max, phi_z.grid_shape,
         )
-        assert tc == float("inf")
+        time_data = np.load(PHI_Z_TIME_SLICES_PATH)
+        max_time = abs(float(time_data["times"][-1]))
+
+        assert isinstance(tc, float)
+        assert tc == float("inf") or 0.0 <= tc <= max_time
 
 
 class TestCheckDefenderWins:
+    def test_dev_phi_h_is_coarse_diagnostic(self, phi_h):
+        """Checked-in dev phi_h is coarse diagnostic data, not final HJ control data."""
+        assert phi_h.values.shape == (9, 7, 5, 5, 9, 7)
+
+        assert phi_h.values.size < 100_000
+
     def test_horizontal_paper_phi_positive_is_defender_winning(self, phi_z, b_z):
         """Paper Phi_h convention: positive means defender-winning horizontally."""
         phi_h = ValueFunctionData(

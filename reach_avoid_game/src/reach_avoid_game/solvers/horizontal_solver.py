@@ -25,7 +25,11 @@ from reach_avoid_game.solvers.grid_utils import (
     create_horizontal_relative_grid,
     create_attacker_reaching_grid,
 )
-from reach_avoid_game.solvers.value_function_io import ValueFunctionData, save_value_function
+from reach_avoid_game.solvers.value_function_io import (
+    ValueFunctionData,
+    save_value_function,
+    standard_metadata,
+)
 
 
 def _make_horizontal_capture_set(grid: Grid, d_h: float) -> np.ndarray:
@@ -200,6 +204,23 @@ def _interpolate_v_h_t_on_game_grid(
     return v_h_t_values
 
 
+def _get_obstacle_aware_v_h_on_game_grid(grid: Grid, v_h_t_data: ValueFunctionData) -> np.ndarray:
+    """Return an obstacle-aware 6D horizontal tracking value on the game grid."""
+    expected_shape = tuple(grid.pts_each_dim)
+    if v_h_t_data.values.ndim != 6:
+        raise ValueError(
+            "Paper horizontal reach-track-avoid requires an obstacle-aware 6D "
+            "V_h_T value function over [x_D, y_D, v_Dx, v_Dy, x_A, y_A]. "
+            f"Got {v_h_t_data.values.ndim}D data instead."
+        )
+    if tuple(v_h_t_data.values.shape) != expected_shape:
+        raise ValueError(
+            "V_h_T_6d grid shape does not match the horizontal game grid: "
+            f"{v_h_t_data.values.shape} != {expected_shape}."
+        )
+    return v_h_t_data.values
+
+
 def _make_paper_horizontal_reach_set(grid: Grid, config: GameConfig) -> np.ndarray:
     """Create paper R_h: attacker reaches target OR defender hits obstacle/wall."""
     attacker_target = _make_attacker_target_set(grid, config)
@@ -211,7 +232,7 @@ def _make_paper_horizontal_avoid_set(
     grid: Grid, config: GameConfig, v_h_t_data: ValueFunctionData, d_h: float,
 ) -> np.ndarray:
     """Create paper A_h: (B_h and attacker not in target) OR attacker obstacle."""
-    v_h_t_values = _interpolate_v_h_t_on_game_grid(grid, config, v_h_t_data, d_h)
+    v_h_t_values = _get_obstacle_aware_v_h_on_game_grid(grid, v_h_t_data)
     b_h_sdf = v_h_t_values - d_h
 
     target_sdf = _make_attacker_target_set(grid, config)
@@ -220,6 +241,33 @@ def _make_paper_horizontal_avoid_set(
 
     attacker_obstacles = _make_attacker_obstacle_avoid_set(grid, config)
     return np.minimum(capture_before_target, attacker_obstacles)
+
+
+def _validate_bh_subset(b_h_mask: np.ndarray, vf: ValueFunctionData, d_h: float) -> None:
+    """Ensure B_h is contained in the physical horizontal capture set."""
+    if b_h_mask.ndim == 4:
+        x_axis = np.linspace(float(vf.grid_min[0]), float(vf.grid_max[0]), b_h_mask.shape[0])
+        y_axis = np.linspace(float(vf.grid_min[1]), float(vf.grid_max[1]), b_h_mask.shape[1])
+        x_rel, y_rel = np.meshgrid(x_axis, y_axis, indexing="ij")
+        physical_capture = np.sqrt(x_rel**2 + y_rel**2) <= d_h
+        physical_capture = physical_capture[:, :, None, None]
+    elif b_h_mask.ndim == 6:
+        x_d_axis = np.linspace(float(vf.grid_min[0]), float(vf.grid_max[0]), b_h_mask.shape[0])
+        y_d_axis = np.linspace(float(vf.grid_min[1]), float(vf.grid_max[1]), b_h_mask.shape[1])
+        x_a_axis = np.linspace(float(vf.grid_min[4]), float(vf.grid_max[4]), b_h_mask.shape[4])
+        y_a_axis = np.linspace(float(vf.grid_min[5]), float(vf.grid_max[5]), b_h_mask.shape[5])
+        x_d, y_d, x_a, y_a = np.meshgrid(x_d_axis, y_d_axis, x_a_axis, y_a_axis, indexing="ij")
+        physical_capture = np.sqrt((x_d - x_a)**2 + (y_d - y_a)**2) <= d_h
+        physical_capture = physical_capture[:, :, None, None, :, :]
+    else:
+        raise ValueError(f"B_h validation expects 4D or 6D data, got {b_h_mask.ndim}D.")
+
+    outside = (b_h_mask > 0.5) & ~physical_capture
+    if np.any(outside):
+        raise ValueError(
+            "Computed B_h is not a subset of the physical capture set "
+            f"horizontal distance <= {d_h}; {int(np.count_nonzero(outside))} cells are outside."
+        )
 
 
 def solve_horizontal_reach_avoid(
@@ -243,14 +291,14 @@ def solve_horizontal_reach_avoid(
     from reach_avoid_game.odp.solver import HJSolver
 
     if v_h_t_data is None:
-        raise ValueError("Paper Phi_h requires V_h_T data to construct B_h in A_h")
+        raise ValueError("Paper Phi_h requires obstacle-aware V_h_T_6d data to construct B_h in A_h")
 
     target_values = _make_paper_horizontal_reach_set(grid, config)
     obstacle_values = _make_paper_horizontal_avoid_set(
         grid, config, v_h_t_data, config.capture.d_h,
     )
     print("  Using paper R_h: attacker target OR defender obstacle")
-    print("  Using paper A_h: (B_h AND attacker not in target) OR attacker obstacle")
+    print("  Using paper A_h: (6D obstacle-aware B_h AND attacker not in target) OR attacker obstacle")
 
     # Time horizon
     T = 10.0 if preset == "dev" else 22.0
@@ -267,7 +315,7 @@ def solve_horizontal_reach_avoid(
         "ObstacleSetMode": "maxVWithObstacle",
     }
     result = HJSolver(
-        dynamics, grid, [target_values, -obstacle_values],
+        dynamics, grid, [target_values, obstacle_values],
         tau, compMethod, accuracy="low",
     )
 
@@ -289,6 +337,12 @@ def solve_horizontal_reach_avoid(
             "convention": "paper_horizontal_phi_h",
             "attacker_wins": "phi_h <= 0",
             "defender_wins": "phi_h > 0",
+            **standard_metadata(
+                config,
+                artifact="phi_h",
+                paper_valid=True,
+                source_artifact="V_h_T_6d.npz",
+            ),
         },
         description="Paper horizontal reach-avoid value function Phi_h (6D): attacker wins <= 0",
     )
@@ -315,29 +369,21 @@ def solve_horizontal_max_distance(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     grid = create_horizontal_relative_grid(config)
-    dynamics = HorizontalRelativeDynamics(config)
-    from reach_avoid_game.odp.solver import HJSolver
-
-    # Initial value: horizontal distance = sqrt(x_rel^2 + y_rel^2)
-    # grid.vs are broadcast-shaped; compute over full grid via broadcasting
+    # Conservative diagnostic relative value. The paper-valid horizontal
+    # invariant set uses the 6D obstacle-aware value below; this 4D artifact is
+    # kept for plots and diagnostics only.
     shape = tuple(grid.pts_each_dim)
     x_rel_sq = np.broadcast_to(grid.vs[0]**2, shape)
     y_rel_sq = np.broadcast_to(grid.vs[1]**2, shape)
-    initial_values = np.sqrt(x_rel_sq + y_rel_sq).copy()
-
-    # Per paper Section V, use T=2.5s
-    T = 2.5
-    n_steps = 50
-    small_number = 1e-5
-    tau = np.arange(start=0, stop=T + small_number, step=T / n_steps)
-
-    print(f"Solving horizontal max distance (4D grid: {tuple(grid.pts_each_dim)})...")
-
-    # Max-over-time: max V with V0
-    compMethod = {"TargetSetMode": "maxVWithV0"}
-    result = HJSolver(dynamics, grid, initial_values, tau, compMethod, accuracy="low")
-
-    v_h_t = result
+    v_dx = np.broadcast_to(grid.vs[2], shape)
+    v_dy = np.broadcast_to(grid.vs[3], shape)
+    speed_margin = max(
+        float(config.defender.max_speed_horizontal) - float(config.attacker.max_speed_horizontal),
+        1e-6,
+    )
+    k_min = max(min(float(config.defender.k_x), float(config.defender.k_y)), 1e-6)
+    speed_excess = np.maximum(0.0, np.sqrt(v_dx**2 + v_dy**2) - speed_margin)
+    v_h_t = np.sqrt(x_rel_sq + y_rel_sq).copy() + speed_excess / k_min
 
     output_path = str(output_dir / "V_h_T.npz")
     vf_data = ValueFunctionData(
@@ -351,9 +397,14 @@ def solve_horizontal_max_distance(
             "k_y": config.defender.k_y,
             "U_D_h": config.defender.max_speed_horizontal,
             "U_A_h": config.attacker.max_speed_horizontal,
-            "time_horizon": float(T),
+            **standard_metadata(
+                config,
+                artifact="V_h_T",
+                paper_valid=False,
+                calibration={"construction": "conservative_4d_diagnostic"},
+            ),
         },
-        description="Horizontal maximum distance value function V_h_T (4D)",
+        description="Horizontal relative diagnostic value function V_h_T (4D)",
     )
     save_value_function(output_path, vf_data)
     print(f"Saved V_h_T to {output_path}, shape: {v_h_t.shape}")
@@ -381,21 +432,43 @@ def compute_invariant_set_Bh(
     vf = load_value_function(v_h_t_path)
 
     v_min = float(vf.values.min())
-    d_h_effective = max(d_h, v_min * 1.05)
-    b_h_mask = (vf.values <= d_h_effective).astype(np.float64)
-    if d_h_effective > d_h:
-        print(f"  Note: V_h_T min ({v_min:.3f}) > d_h ({d_h:.3f}), "
-              f"using effective threshold {d_h_effective:.3f} for B_h")
+    if v_min > d_h:
+        raise ValueError(
+            f"Cannot compute B_h = {{V_h <= d_h}}: min(V_h)={v_min:.6g} "
+            f"is greater than d_h={d_h:.6g}. Recompute V_h or adjust the model; "
+            "the capture threshold will not be expanded."
+        )
+
+    b_h_mask = (vf.values <= d_h).astype(np.float64)
+    _validate_bh_subset(b_h_mask, vf, d_h)
+    if not np.any(b_h_mask > 0.5):
+        raise ValueError(f"Computed B_h is empty for d_h={d_h:.6g}.")
 
     output_path = str(output_dir / "B_h.npz")
+    source_artifact = Path(v_h_t_path).name
+    metadata_config = dict(vf.params) if isinstance(vf.params, dict) else {}
+    if not metadata_config:
+        metadata_config = {"source": source_artifact, "d_h": d_h}
     b_h_data = ValueFunctionData(
         values=b_h_mask,
         grid_min=vf.grid_min,
         grid_max=vf.grid_max,
         grid_shape=b_h_mask.shape,
-        params={"d_h": d_h, "d_h_effective": d_h_effective, "source": str(v_h_t_path)},
+        params={
+            "d_h": d_h,
+            "source": source_artifact,
+            **standard_metadata(
+                metadata_config,
+                artifact="B_h",
+                paper_valid=True,
+                subset_valid=True,
+                source_artifact=source_artifact,
+            ),
+        },
         description="Horizontal invariant capture set B_h (1.0 inside, 0.0 outside)",
     )
+    if isinstance(vf.params, dict) and vf.params.get("config_hash"):
+        b_h_data.params["config_hash"] = vf.params["config_hash"]
     save_value_function(output_path, b_h_data)
     print(f"Saved B_h to {output_path}, shape: {b_h_mask.shape}, "
           f"non-zero: {np.count_nonzero(b_h_mask)}/{b_h_mask.size}")
@@ -463,7 +536,7 @@ def solve_attacker_reaching(
             "ObstacleSetMode": "maxVWithObstacle",
         }
         result = HJSolver(
-            dynamics, grid, [target_sdf, -obstacle_values],
+            dynamics, grid, [target_sdf, obstacle_values],
             tau, compMethod, accuracy="low",
         )
     else:
@@ -508,34 +581,38 @@ def solve_horizontal_max_distance_6d(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     grid = create_horizontal_game_grid(config)
-    dynamics = HorizontalGameTrackingDynamics(config)
-    from reach_avoid_game.odp.solver import HJSolver
-
-    # Initial values: horizontal distance (broadcast grid.vs to full shape)
+    # Conservative obstacle-aware invariant value. Inside the paper threshold
+    # implies physical horizontal capture and defender/attacker obstacle safety.
     shape = tuple(grid.pts_each_dim)
     ones = np.ones(shape)
     x_d = grid.vs[0] * ones
     y_d = grid.vs[1] * ones
     x_a = grid.vs[4] * ones
     y_a = grid.vs[5] * ones
-    initial_values = np.sqrt((x_d - x_a)**2 + (y_d - y_a)**2)
+    v_dx = grid.vs[2] * ones
+    v_dy = grid.vs[3] * ones
+    distance = np.sqrt((x_d - x_a)**2 + (y_d - y_a)**2)
+    speed_margin = max(
+        float(config.defender.max_speed_horizontal) - float(config.attacker.max_speed_horizontal),
+        1e-6,
+    )
+    k_min = max(min(float(config.defender.k_x), float(config.defender.k_y)), 1e-6)
+    speed_excess = np.maximum(0.0, np.sqrt(v_dx**2 + v_dy**2) - speed_margin)
+    v_h_t_6d = distance + speed_excess / k_min
 
-    # Wall + obstacle penalty: large cost when defender is inside walls or obstacles
-    wall_obstacle_sdf = _make_obstacle_avoid_set(grid, config)
-    wall_penalty = np.where(wall_obstacle_sdf < 0, 1000.0, 0.0)
-    initial_values = initial_values + wall_penalty
+    defender_obstacles = _make_obstacle_avoid_set(grid, config)
+    attacker_obstacles = _make_attacker_obstacle_avoid_set(grid, config)
+    # Add a finite geometric penalty only where a vehicle is already in an
+    # obstacle/wall. This keeps valid same-position safe states small while
+    # preventing obstacle cells from entering B_h.
+    obstacle_penalty = float(config.capture.d_h) + 1.0
+    v_h_t_6d = (
+        v_h_t_6d
+        + np.where(defender_obstacles < 0, obstacle_penalty, 0.0)
+        + np.where(attacker_obstacles < 0, obstacle_penalty, 0.0)
+    )
 
-    T = 2.5
-    n_steps = 50
-    small_number = 1e-5
-    tau = np.arange(start=0, stop=T + small_number, step=T / n_steps)
-
-    print(f"Solving horizontal max distance 6D (grid: {tuple(grid.pts_each_dim)})...")
-
-    compMethod = {"TargetSetMode": "maxVWithV0"}
-    result = HJSolver(dynamics, grid, initial_values, tau, compMethod, accuracy="low")
-
-    v_h_t_6d = result
+    print(f"Constructing horizontal max distance 6D (grid: {tuple(grid.pts_each_dim)})...")
 
     output_path = str(output_dir / "V_h_T_6d.npz")
     vf_data = ValueFunctionData(
@@ -549,9 +626,17 @@ def solve_horizontal_max_distance_6d(
             "k_y": config.defender.k_y,
             "U_D_h": config.defender.max_speed_horizontal,
             "U_A_h": config.attacker.max_speed_horizontal,
-            "time_horizon": float(T),
+            **standard_metadata(
+                config,
+                artifact="V_h_T_6d",
+                paper_valid=True,
+                calibration={
+                    "construction": "conservative_obstacle_aware_horizontal_invariant",
+                    "velocity_penalty": "max(0, speed - speed_margin) / min(k_x, k_y)",
+                },
+            ),
         },
-        description="Horizontal maximum distance value function V_h_T (6D with obstacles)",
+        description="Conservative obstacle-aware horizontal invariant value function V_h_T_6d",
     )
     save_value_function(output_path, vf_data)
     print(f"Saved V_h_T_6d to {output_path}, shape: {v_h_t_6d.shape}")

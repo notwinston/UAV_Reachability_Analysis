@@ -1,16 +1,18 @@
 """Ground truth relay ROS2 node.
 
-Reads drone positions from PX4's vehicle_local_position DDS topic
-and converts to absolute Gazebo-frame coordinates by adding the known
-spawn position offset. PX4 local_position is relative to takeoff point.
+Reads drone positions from Gazebo's model-pose stream when available.
+Falls back to PX4 vehicle_local_position DDS topics for setups without the
+Gazebo pose bridge.
 """
 
 def main(args=None):
     try:
+        import math
         import rclpy
         from rclpy.node import Node
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
         from geometry_msgs.msg import PoseStamped, TwistStamped
+        from tf2_msgs.msg import TFMessage
 
         try:
             from px4_msgs.msg import VehicleLocalPosition
@@ -54,6 +56,7 @@ def main(args=None):
                 self.defender_vel_pub = self.create_publisher(TwistStamped, '/defender/velocity', 10)
                 self.attacker_pose_pub = self.create_publisher(PoseStamped, '/attacker/state', 10)
                 self.attacker_vel_pub = self.create_publisher(TwistStamped, '/attacker/velocity', 10)
+                self.create_subscription(TFMessage, '/gz/pose_info', self._gz_pose_cb, 10)
 
                 qos_px4 = QoSProfile(
                     reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -72,7 +75,9 @@ def main(args=None):
                         '/attacker/fmu/out/vehicle_local_position_v1',
                         self._attacker_cb, qos_px4)
 
-                    self.get_logger().info('Using px4_msgs VehicleLocalPosition for ground truth')
+                    self.get_logger().info(
+                        'Using Gazebo /gz/pose_info for ground truth with PX4 local-position fallback'
+                    )
                 else:
                     self.get_logger().error('px4_msgs not available — cannot relay ground truth')
 
@@ -80,12 +85,48 @@ def main(args=None):
                 self._latest_attacker_pose = None
                 self._latest_defender_vel = None
                 self._latest_attacker_vel = None
+                self._last_gz_samples = {}
+                self._have_gz_defender = False
+                self._have_gz_attacker = False
                 self._timer = self.create_timer(1.0 / publish_rate, self._publish_timer)
 
                 self.get_logger().info(
                     f'Ground truth relay started: '
                     f'defender={self._defender_model} spawn={self._defender_spawn}, '
                     f'attacker={self._attacker_model} spawn={self._attacker_spawn}')
+
+            def _gz_pose_cb(self, msg: TFMessage):
+                for transform in msg.transforms:
+                    name = transform.child_frame_id
+                    if self._defender_model in name:
+                        self._latest_defender_pose, self._latest_defender_vel = \
+                            self._convert_gz_transform(transform, 'defender')
+                        self._have_gz_defender = True
+                    elif self._attacker_model in name:
+                        self._latest_attacker_pose, self._latest_attacker_vel = \
+                            self._convert_gz_transform(transform, 'attacker')
+                        self._have_gz_attacker = True
+
+            def _convert_gz_transform(self, transform, key):
+                pose = PoseStamped()
+                pose.header.frame_id = 'world'
+                pose.pose.position.x = float(transform.transform.translation.x)
+                pose.pose.position.y = float(transform.transform.translation.y)
+                pose.pose.position.z = float(transform.transform.translation.z)
+                pose.pose.orientation = transform.transform.rotation
+
+                now = self.get_clock().now().nanoseconds / 1e9
+                vel = TwistStamped()
+                vel.header.frame_id = 'world'
+                previous = self._last_gz_samples.get(key)
+                current = (now, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z)
+                if previous is not None:
+                    dt = max(1e-3, current[0] - previous[0])
+                    vel.twist.linear.x = (current[1] - previous[1]) / dt
+                    vel.twist.linear.y = (current[2] - previous[2]) / dt
+                    vel.twist.linear.z = (current[3] - previous[3]) / dt
+                self._last_gz_samples[key] = current
+                return pose, vel
 
             def _convert(self, msg, spawn):
                 """Convert PX4 local position (NED, relative to spawn) to absolute Gazebo frame.
@@ -109,11 +150,15 @@ def main(args=None):
                 return pose, vel
 
             def _defender_cb(self, msg):
+                if self._have_gz_defender:
+                    return
                 if msg.z_valid or msg.timestamp > 0:
                     self._latest_defender_pose, self._latest_defender_vel = \
                         self._convert(msg, self._defender_spawn)
 
             def _attacker_cb(self, msg):
+                if self._have_gz_attacker:
+                    return
                 if msg.z_valid or msg.timestamp > 0:
                     self._latest_attacker_pose, self._latest_attacker_vel = \
                         self._convert(msg, self._attacker_spawn)

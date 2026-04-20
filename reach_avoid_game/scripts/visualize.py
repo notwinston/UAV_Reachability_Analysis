@@ -76,7 +76,8 @@ def main():
         vf = load_value_function(vf_dir / "phi_A_reach.npz")
         save_path = args.save or "/workspace/data/plots/winning_regions.png"
         plot_winning_regions(vf, slice_dims=slice_dims, slice_values=slice_values,
-                            save_path=save_path, title="Attacker Reachable Region")
+                            save_path=save_path, title="Attacker Reachable Region",
+                            convention="attacker_reach")
 
     elif args.type == "attacker_reaching":
         vf = load_value_function(vf_dir / "phi_A_reach.npz")

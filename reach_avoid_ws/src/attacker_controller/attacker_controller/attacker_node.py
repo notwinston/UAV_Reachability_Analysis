@@ -9,11 +9,25 @@ Supports four control modes:
 
 import math
 
+
+def _clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def _clamp_horizontal_speed(x, y, limit):
+    speed = math.hypot(x, y)
+    if speed <= limit or speed < 1e-9:
+        return x, y
+    scale = limit / speed
+    return x * scale, y * scale
+
+
 def main(args=None):
     try:
         import rclpy
         from rclpy.node import Node
         from geometry_msgs.msg import Twist, PoseStamped, TwistStamped
+        from std_msgs.msg import String
         from std_srvs.srv import SetBool
         import yaml
         import numpy as np
@@ -44,6 +58,22 @@ def main(args=None):
                 self.declare_parameter('waypoints', [0.0])
                 self.declare_parameter('value_function_dir', '/home/simuser/ws/data/value_functions/')
                 self.declare_parameter('target_altitude', 10.0)
+                self.declare_parameter('room_x_min', 0.0)
+                self.declare_parameter('room_x_max', 45.0)
+                self.declare_parameter('room_y_min', 0.0)
+                self.declare_parameter('room_y_max', 25.0)
+                self.declare_parameter('room_z_min', 0.5)
+                self.declare_parameter('room_z_max', 20.0)
+                self.declare_parameter('obstacle_x_min', 15.0)
+                self.declare_parameter('obstacle_x_max', 20.0)
+                self.declare_parameter('obstacle_y_min', 5.0)
+                self.declare_parameter('obstacle_y_max', 20.0)
+                self.declare_parameter('safety_margin', 1.5)
+                self.declare_parameter('obstacle_margin', 3.0)
+                self.declare_parameter('safety_lookahead', 1.0)
+                self.declare_parameter('command_filter_alpha', 0.35)
+                self.declare_parameter('max_accel_horizontal', 1.0)
+                self.declare_parameter('max_accel_vertical', 1.0)
 
                 self._mode = self.get_parameter('mode').value
                 self._max_speed = self.get_parameter('max_speed').value
@@ -53,6 +83,28 @@ def main(args=None):
                     self.get_parameter('target_y').value,
                     self.get_parameter('target_z').value,
                 ]
+                self._room_min = [
+                    float(self.get_parameter('room_x_min').value),
+                    float(self.get_parameter('room_y_min').value),
+                    float(self.get_parameter('room_z_min').value),
+                ]
+                self._room_max = [
+                    float(self.get_parameter('room_x_max').value),
+                    float(self.get_parameter('room_y_max').value),
+                    float(self.get_parameter('room_z_max').value),
+                ]
+                self._obstacle = {
+                    'x_min': float(self.get_parameter('obstacle_x_min').value),
+                    'x_max': float(self.get_parameter('obstacle_x_max').value),
+                    'y_min': float(self.get_parameter('obstacle_y_min').value),
+                    'y_max': float(self.get_parameter('obstacle_y_max').value),
+                }
+                self._safety_margin = float(self.get_parameter('safety_margin').value)
+                self._obstacle_margin = float(self.get_parameter('obstacle_margin').value)
+                self._safety_lookahead = float(self.get_parameter('safety_lookahead').value)
+                self._filter_alpha = float(self.get_parameter('command_filter_alpha').value)
+                self._max_accel_h = float(self.get_parameter('max_accel_horizontal').value)
+                self._max_accel_z = float(self.get_parameter('max_accel_vertical').value)
                 waypoints_param = self.get_parameter('waypoints').value
                 self._waypoints = self._parse_waypoints(waypoints_param)
 
@@ -62,9 +114,12 @@ def main(args=None):
                 self._defender_position = None
                 self._defender_velocity = None
                 self._current_waypoint_idx = 0
+                self._terminal_stop = False
 
                 # For switchable mode, track active sub-mode
                 self._active_submode = 'scripted'
+                self._filtered_cmd = [0.0, 0.0, 0.0]
+                self._last_control_time = None
 
                 # Subscribers
                 self.create_subscription(
@@ -82,6 +137,10 @@ def main(args=None):
                 self.create_subscription(
                     TwistStamped, '/defender/velocity',
                     self._defender_velocity_callback, 10
+                )
+                self.create_subscription(
+                    String, '/game/status',
+                    self._game_status_callback, 10,
                 )
 
                 # Keyboard mode subscriber
@@ -190,6 +249,12 @@ def main(args=None):
                     msg.twist.linear.z,
                 ]
 
+            def _game_status_callback(self, msg: String):
+                """Latch terminal game status so PX4 receives hover commands."""
+                status = msg.data.split('|', 1)[0].strip()
+                if status in ('CAPTURED', 'ATTACKER_REACHED_TARGET'):
+                    self._terminal_stop = True
+
             def _set_mode_callback(self, request, response):
                 """Service callback for switchable mode.
 
@@ -209,6 +274,9 @@ def main(args=None):
             def _control_loop(self):
                 """Main control loop at 20Hz."""
                 cmd = Twist()
+                if self._terminal_stop:
+                    self.cmd_vel_pub.publish(cmd)
+                    return
 
                 if self._mode == 'scripted':
                     cmd = self._scripted_control()
@@ -224,7 +292,121 @@ def main(args=None):
                 else:
                     self.get_logger().warn(f'Unknown mode: {self._mode}', throttle_duration_sec=5.0)
 
+                cmd = self._condition_command(cmd)
                 self.cmd_vel_pub.publish(cmd)
+
+            def _condition_command(self, cmd):
+                vx = float(cmd.linear.x)
+                vy = float(cmd.linear.y)
+                vz = float(cmd.linear.z)
+                vx, vy = _clamp_horizontal_speed(vx, vy, self._U_A_h)
+                vz = _clamp(vz, -self._U_A_z, self._U_A_z)
+                vx, vy, vz = self._apply_geofence_projection(vx, vy, vz)
+                vx, vy = self._apply_obstacle_projection(vx, vy)
+                vx, vy = _clamp_horizontal_speed(vx, vy, self._U_A_h)
+                vx, vy, vz = self._smooth(vx, vy, vz)
+                vx, vy, vz = self._apply_geofence_projection(vx, vy, vz)
+                vx, vy = self._apply_obstacle_projection(vx, vy)
+                vx, vy = _clamp_horizontal_speed(vx, vy, self._U_A_h)
+                vz = _clamp(vz, -self._U_A_z, self._U_A_z)
+                filtered = Twist()
+                filtered.linear.x = vx
+                filtered.linear.y = vy
+                filtered.linear.z = vz
+                return filtered
+
+            def _smooth(self, vx, vy, vz):
+                now = self.get_clock().now().nanoseconds / 1e9
+                if self._last_control_time is None:
+                    self._last_control_time = now
+                dt = max(0.001, min(0.2, now - self._last_control_time))
+                self._last_control_time = now
+                max_delta_h = self._max_accel_h * dt
+                max_delta_z = self._max_accel_z * dt
+                targets = [vx, vy, vz]
+                limits = [max_delta_h, max_delta_h, max_delta_z]
+                limited = []
+                for target, previous, delta in zip(targets, self._filtered_cmd, limits):
+                    limited.append(previous + _clamp(target - previous, -delta, delta))
+                alpha = _clamp(self._filter_alpha, 0.0, 1.0)
+                self._filtered_cmd = [
+                    (1.0 - alpha) * self._filtered_cmd[0] + alpha * limited[0],
+                    (1.0 - alpha) * self._filtered_cmd[1] + alpha * limited[1],
+                    (1.0 - alpha) * self._filtered_cmd[2] + alpha * limited[2],
+                ]
+                self._filtered_cmd[0], self._filtered_cmd[1] = _clamp_horizontal_speed(
+                    self._filtered_cmd[0], self._filtered_cmd[1], self._U_A_h
+                )
+                self._filtered_cmd[2] = _clamp(self._filtered_cmd[2], -self._U_A_z, self._U_A_z)
+                return tuple(self._filtered_cmd)
+
+            def _apply_geofence_projection(self, vx, vy, vz):
+                if self._position is None:
+                    return vx, vy, vz
+                cmd = [vx, vy, vz]
+                for i, p in enumerate(self._position):
+                    lo = self._room_min[i]
+                    hi = self._room_max[i]
+                    margin = self._safety_margin
+                    if p <= lo + margin and cmd[i] < 0.0:
+                        cmd[i] *= max(0.0, (p - lo) / margin)
+                    if p >= hi - margin and cmd[i] > 0.0:
+                        cmd[i] *= max(0.0, (hi - p) / margin)
+                    projected = p + cmd[i] * self._safety_lookahead
+                    if projected < lo + 0.25:
+                        cmd[i] = max(cmd[i], (lo + 0.25 - p) / self._safety_lookahead)
+                    if projected > hi - 0.25:
+                        cmd[i] = min(cmd[i], (hi - 0.25 - p) / self._safety_lookahead)
+                    if p <= lo + 0.25:
+                        cmd[i] = max(cmd[i], 0.5)
+                    if p >= hi - 0.25:
+                        cmd[i] = min(cmd[i], -0.5)
+                return cmd[0], cmd[1], cmd[2]
+
+            def _apply_obstacle_projection(self, vx, vy):
+                if self._position is None:
+                    return vx, vy
+                x, y = self._position[0], self._position[1]
+                obs = self._obstacle
+                margin = self._obstacle_margin
+                px = x + vx * self._safety_lookahead
+                py = y + vy * self._safety_lookahead
+                near_now = (
+                    obs['x_min'] - margin <= x <= obs['x_max'] + margin
+                    and obs['y_min'] - margin <= y <= obs['y_max'] + margin
+                )
+                near_next = (
+                    obs['x_min'] - margin <= px <= obs['x_max'] + margin
+                    and obs['y_min'] - margin <= py <= obs['y_max'] + margin
+                )
+                if not (near_now or near_next):
+                    return vx, vy
+                distances = {
+                    'left': abs(x - obs['x_min']),
+                    'right': abs(x - obs['x_max']),
+                    'bottom': abs(y - obs['y_min']),
+                    'top': abs(y - obs['y_max']),
+                }
+                side = min(distances, key=distances.get)
+                inside = obs['x_min'] <= x <= obs['x_max'] and obs['y_min'] <= y <= obs['y_max']
+                push = 1.0 if inside else 0.0
+                if side == 'left':
+                    if vx > 0.0:
+                        vx = 0.0
+                    vx = min(vx, -push)
+                elif side == 'right':
+                    if vx < 0.0:
+                        vx = 0.0
+                    vx = max(vx, push)
+                elif side == 'bottom':
+                    if vy > 0.0:
+                        vy = 0.0
+                    vy = min(vy, -push)
+                elif side == 'top':
+                    if vy < 0.0:
+                        vy = 0.0
+                    vy = max(vy, push)
+                return vx, vy
 
             def _scripted_control(self):
                 """Follow waypoints toward target at constant speed.

@@ -116,7 +116,9 @@ def plot_winning_regions(
     """Plot winning regions W_D (blue) and W_A (red).
 
     For ``defender_capture``, W_D = {phi <= 0}. For paper horizontal Phi_h,
-    W_D,h = {Phi_h > 0} and W_A,h = {Phi_h <= 0}.
+    W_D,h = {Phi_h > 0} and W_A,h = {Phi_h <= 0}. For
+    ``attacker_reach``, the sub-zero set is shown as the attacker reachable
+    region.
 
     Args:
         phi_data: Value function data
@@ -125,7 +127,7 @@ def plot_winning_regions(
         ax: Optional matplotlib Axes
         save_path: Optional path to save figure
         title: Optional title
-        convention: "defender_capture" or "paper_horizontal"
+        convention: "defender_capture", "paper_horizontal", or "attacker_reach"
 
     Returns:
         The matplotlib Axes object
@@ -179,9 +181,18 @@ def plot_winning_regions(
     if convention == "paper_horizontal":
         w_d = (plot_data > 0).astype(float)
         w_a = (plot_data <= 0).astype(float)
+        blue_label = "W_D (defender wins)"
+        red_label = "W_A (attacker wins)"
     elif convention == "defender_capture":
         w_d = (plot_data <= 0).astype(float)
         w_a = (plot_data > 0).astype(float)
+        blue_label = "W_D (defender wins)"
+        red_label = "W_A (attacker wins)"
+    elif convention == "attacker_reach":
+        w_d = (plot_data <= 0).astype(float)
+        w_a = (plot_data > 0).astype(float)
+        blue_label = "Reachable target set"
+        red_label = "Not reachable within horizon"
     else:
         raise ValueError(f"Unknown winning-region convention: {convention}")
 
@@ -196,8 +207,8 @@ def plot_winning_regions(
     # Legend
     from matplotlib.patches import Patch
     legend_elements = [
-        Patch(facecolor="steelblue", alpha=0.5, label="W_D (defender wins)"),
-        Patch(facecolor="salmon", alpha=0.5, label="W_A (attacker wins)"),
+        Patch(facecolor="steelblue", alpha=0.5, label=blue_label),
+        Patch(facecolor="salmon", alpha=0.5, label=red_label),
     ]
     ax.legend(handles=legend_elements, loc="upper right")
 

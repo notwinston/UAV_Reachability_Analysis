@@ -23,6 +23,15 @@ def _clamp(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
 
 
+def _clamp_horizontal_speed(u_x: float, u_y: float, speed_limit: float) -> tuple[float, float]:
+    """Clamp a horizontal command to the configured speed magnitude."""
+    speed = math.hypot(u_x, u_y)
+    if speed <= speed_limit or speed < 1e-12:
+        return float(u_x), float(u_y)
+    scale = speed_limit / speed
+    return float(u_x * scale), float(u_y * scale)
+
+
 class DefenderControlLogic:
     """Pure control logic separated from ROS2 for testability.
 
@@ -33,16 +42,18 @@ class DefenderControlLogic:
     def __init__(
         self,
         loader: ValueFunctionLoader,
-        pid_gain_z: float = 2.0,
+        pid_gain_z: float = 8.0,
         pid_gain_h: float = 2.0,
         margin_z_factor: float = 0.3,
         margin_h_factor: float = 0.3,
+        gradient_deadband: float = 1e-6,
     ):
         self.loader = loader
         self.pid_gain_z = pid_gain_z
         self.pid_gain_h = pid_gain_h
         self.margin_z_factor = margin_z_factor
         self.margin_h_factor = margin_h_factor
+        self.gradient_deadband = gradient_deadband
 
         # Extract game parameters from value functions
         z_params = loader.get_params("phi_z") if "phi_z" in loader.loaded_names else {}
@@ -59,12 +70,42 @@ class DefenderControlLogic:
         self.U_D_h = h_params.get("U_D_h", 6.0)
         self.U_A_h = h_params.get("U_A_h", 3.0)
 
-        # B_z effective threshold from B_z params
-        bz_params = loader.get_params("B_z") if "B_z" in loader.loaded_names else {}
-        self.d_z_eff = bz_params.get("d_z_effective", self.d_z)
+        self.b_z_valid = self._valid_invariant_mask("B_z", "d_z_effective", self.d_z)
 
-        bh_params = loader.get_params("B_h") if "B_h" in loader.loaded_names else {}
-        self.d_h_eff = bh_params.get("d_h_effective", self.d_h)
+        self.b_h_valid = self._valid_invariant_mask("B_h", "d_h_effective", self.d_h)
+        self.h_tracking_vf_name = self._select_horizontal_tracking_vf()
+
+    def _valid_invariant_mask(self, name: str, effective_key: str, threshold: float) -> bool:
+        """Reject threshold-expanded or empty invariant masks."""
+        if name not in self.loader.loaded_names:
+            return False
+        params = self.loader.get_params(name)
+        if float(params.get(effective_key, threshold)) > threshold + 1e-9:
+            return False
+        values = getattr(self.loader.vf_data[name], "values", None)
+        return (
+            values is not None
+            and bool(params.get("paper_valid", False))
+            and bool(params.get("subset_valid", True))
+            and bool(np.any(np.asarray(values) > 0.5))
+        )
+
+    def _value_function_reaches_threshold(self, name: str, threshold: float) -> bool:
+        if name not in self.loader.loaded_names:
+            return False
+        values = getattr(self.loader.vf_data[name], "values", None)
+        return values is not None and float(np.nanmin(values)) <= threshold
+
+    def _select_horizontal_tracking_vf(self) -> str | None:
+        """Use only obstacle-aware 6D tracking data for paper Algorithm 2."""
+        vf = self.loader.vf_data.get("V_h_T_6d") if "V_h_T_6d" in self.loader.loaded_names else None
+        if (
+            vf is not None
+            and getattr(vf, "values", np.array([])).ndim == 6
+            and self._value_function_reaches_threshold("V_h_T_6d", self.d_h)
+        ):
+            return "V_h_T_6d"
+        return None
 
     def compute_control(
         self,
@@ -126,13 +167,48 @@ class DefenderControlLogic:
             np.array([x_A, y_A]), z_rel, x_rel, y_rel,
             defender_pos, attacker_pos,
         ))
+        if status.get("captured", False):
+            return np.zeros(3, dtype=float), status
 
         cmd_vel = np.array([u_x, u_y, u_z])
 
         # Apply wall-avoidance safety layer
         cmd_vel = self._apply_wall_avoidance(cmd_vel, defender_pos, defender_vel)
+        cmd_vel = self._apply_obstacle_avoidance(cmd_vel, defender_pos)
 
         return cmd_vel, status
+
+    def _apply_obstacle_avoidance(self, cmd_vel: np.ndarray, defender_pos: np.ndarray) -> np.ndarray:
+        """Project horizontal commands away from configured box obstacles.
+
+        The controller does not own the full YAML config, so this mirrors the
+        default obstacle used by the reachability configuration.
+        """
+        result = cmd_vel.copy()
+        obstacles = [(15.0, 20.0, 5.0, 20.0)]
+        margin = 1.0
+        x, y = float(defender_pos[0]), float(defender_pos[1])
+        for x_min, x_max, y_min, y_max in obstacles:
+            near_x = x_min - margin <= x <= x_max + margin
+            near_y = y_min - margin <= y <= y_max + margin
+            if not (near_x and near_y):
+                continue
+            distances = {
+                "left": abs(x - x_min),
+                "right": abs(x - x_max),
+                "bottom": abs(y - y_min),
+                "top": abs(y - y_max),
+            }
+            side = min(distances, key=distances.get)
+            if side == "left" and result[0] > 0:
+                result[0] = min(result[0], 0.0)
+            elif side == "right" and result[0] < 0:
+                result[0] = max(result[0], 0.0)
+            elif side == "bottom" and result[1] > 0:
+                result[1] = min(result[1], 0.0)
+            elif side == "top" and result[1] < 0:
+                result[1] = max(result[1], 0.0)
+        return result
 
     def _apply_wall_avoidance(
         self,
@@ -214,6 +290,8 @@ class DefenderControlLogic:
         """
         if "B_z" not in self.loader.loaded_names:
             return self._pid_vertical(z_D, z_A), "pid_fallback"
+        if not self.b_z_valid:
+            return self._pid_vertical(z_D, z_A), "pid_invalid_bz"
 
         # First check: are we in the defender's winning region?
         in_winning = False
@@ -229,7 +307,10 @@ class DefenderControlLogic:
         if not in_B_z:
             if in_winning and "phi_z" in self.loader.loaded_names:
                 # Mode 2: In winning region, optimal reaching from phi_z gradient
-                return self._optimal_reaching_vertical(vertical_state), "reaching"
+                u_z = self._optimal_reaching_vertical(vertical_state)
+                if self._vertical_command_closes_gap(u_z, z_rel):
+                    return u_z, "reaching"
+                return self._pid_vertical(z_D, z_A), "pid_pursuit"
             # Outside winning region or no VF: PID pursuit
             return self._pid_vertical(z_D, z_A), "pid_pursuit"
 
@@ -237,11 +318,14 @@ class DefenderControlLogic:
         margin_z = self.margin_z_factor * self.d_z
         if "V_z_inf" in self.loader.loaded_names:
             v_z_inf_val = self.loader.get_value("V_z_inf", bz_state)
-            near_boundary = v_z_inf_val > (self.d_z_eff - margin_z)
+            near_boundary = v_z_inf_val > (self.d_z - margin_z)
 
             if near_boundary:
                 # Mode 3: Optimal tracking from V_z_inf gradient
-                return self._optimal_tracking_vertical(bz_state), "tracking"
+                u_z = self._optimal_tracking_vertical(bz_state)
+                if self._vertical_command_closes_gap(u_z, z_rel):
+                    return u_z, "tracking"
+                return self._pid_vertical(z_D, z_A), "pid_pursuit"
 
         # Mode 4: Deep inside B_z, use PID
         return self._pid_vertical(z_D, z_A), "pid_deep"
@@ -254,6 +338,8 @@ class DefenderControlLogic:
         grad = self.loader.get_gradient("phi_z", vertical_state)
         # v_D_z is at index 1 in [z_D, v_D_z, z_A]
         direction = grad[1] * self.k_z
+        if abs(direction) < self.gradient_deadband:
+            return 0.0
         return -self.U_D_z if direction > 0 else self.U_D_z
 
     def _optimal_tracking_vertical(self, bz_state: np.ndarray) -> float:
@@ -265,12 +351,18 @@ class DefenderControlLogic:
         grad = self.loader.get_gradient("V_z_inf", bz_state)
         # v_D_z is at index 1 in [z_rel, v_D_z]
         direction = grad[1] * self.k_z
-        return -self.U_D_z if direction >= 0 else self.U_D_z
+        if abs(direction) < self.gradient_deadband:
+            return 0.0
+        return -self.U_D_z if direction > 0 else self.U_D_z
 
     def _pid_vertical(self, z_D: float, z_A: float) -> float:
         """Simple PID tracking: drive z_D toward z_A."""
         error = z_A - z_D
         return _clamp(self.pid_gain_z * error, self.U_D_z)
+
+    def _vertical_command_closes_gap(self, u_z: float, z_rel: float) -> bool:
+        """Check whether a command moves defender toward attacker vertically."""
+        return (z_rel * u_z) < -self.gradient_deadband
 
     def _horizontal_reach_track(
         self,
@@ -298,8 +390,10 @@ class DefenderControlLogic:
         Returns:
             (u_x, u_y, mode string)
         """
-        if "B_h" not in self.loader.loaded_names:
-            return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_fallback"
+        if self.h_tracking_vf_name is None:
+            return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_invalid_bh"
+        if math.sqrt(x_rel**2 + y_rel**2) <= self.d_h:
+            return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_deep"
 
         # First check: are we in the defender's winning region?
         in_winning = False
@@ -307,27 +401,32 @@ class DefenderControlLogic:
             phi_h_val = self.loader.get_value("phi_h", horizontal_state)
             in_winning = phi_h_val > 0
 
-        # B_h is in relative coords: [x_rel, y_rel, vx_D, vy_D]
-        bh_state = np.array([x_rel, y_rel, vx_D, vy_D])
-        b_h_val = self.loader.get_value("B_h", bh_state)
-        in_B_h = b_h_val > 0.5
+        # Paper Algorithm 2 uses obstacle-aware horizontal invariant tracking.
+        h_tracking_state = horizontal_state
+        v_h_val_current = self.loader.get_value(self.h_tracking_vf_name, h_tracking_state)
+        in_B_h = v_h_val_current <= self.d_h
 
         if not in_B_h:
             if in_winning and "phi_h" in self.loader.loaded_names:
                 # Mode 2: In winning region, optimal reaching from phi_h
-                return *self._optimal_reaching_horizontal(horizontal_state), "reaching"
+                u_x, u_y = self._optimal_reaching_horizontal(horizontal_state)
+                if self._horizontal_command_closes_gap(u_x, u_y, x_rel, y_rel):
+                    return u_x, u_y, "reaching"
+                return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_pursuit"
             # Outside winning region or no VF: PID pursuit toward attacker
             return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_pursuit"
 
         # Inside B_h
         margin_h = self.margin_h_factor * self.d_h
-        if "V_h_T" in self.loader.loaded_names:
-            v_h_val = self.loader.get_value("V_h_T", bh_state)
-            near_boundary = v_h_val > (self.d_h_eff - margin_h)
+        if self.h_tracking_vf_name is not None:
+            near_boundary = v_h_val_current > (self.d_h - margin_h)
 
             if near_boundary:
                 # Mode 3: Optimal tracking from V_h_T gradient
-                return *self._optimal_tracking_horizontal(bh_state), "tracking"
+                u_x, u_y = self._optimal_tracking_horizontal(h_tracking_state)
+                if self._horizontal_command_closes_gap(u_x, u_y, x_rel, y_rel):
+                    return u_x, u_y, "tracking"
+                return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_pursuit"
 
         # Mode 4: Deep inside B_h, PID
         return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_deep"
@@ -346,25 +445,33 @@ class DefenderControlLogic:
         dir_x = grad[2] * self.k_x
         dir_y = grad[3] * self.k_y
 
-        u_x = self.U_D_h if dir_x >= 0 else -self.U_D_h
-        u_y = self.U_D_h if dir_y >= 0 else -self.U_D_h
-        return u_x, u_y
+        u_x = self.U_D_h if dir_x > 0 else -self.U_D_h
+        u_y = self.U_D_h if dir_y > 0 else -self.U_D_h
+        if abs(dir_x) < self.gradient_deadband:
+            u_x = 0.0
+        if abs(dir_y) < self.gradient_deadband:
+            u_y = 0.0
+        return _clamp_horizontal_speed(u_x, u_y, self.U_D_h)
 
-    def _optimal_tracking_horizontal(self, bh_state: np.ndarray) -> tuple[float, float]:
+    def _optimal_tracking_horizontal(self, h_tracking_state: np.ndarray) -> tuple[float, float]:
         """Extract optimal horizontal tracking control from V_h_T gradient.
 
-        Defender minimizes V_h_T to stay inside B_h.
-        State: [x_rel, y_rel, vx_D, vy_D]
+        Defender minimizes obstacle-aware V_h_T to stay inside B_h.
+        State: [x_D, y_D, vx_D, vy_D, x_A, y_A]
         u_x = -U_D_h * sign(dV/dv_Dx * k_x)
         """
-        grad = self.loader.get_gradient("V_h_T", bh_state)
+        grad = self.loader.get_gradient(self.h_tracking_vf_name, h_tracking_state)
         # v_D_x at index 2, v_D_y at index 3
         dir_x = grad[2] * self.k_x
         dir_y = grad[3] * self.k_y
 
-        u_x = -self.U_D_h if dir_x >= 0 else self.U_D_h
-        u_y = -self.U_D_h if dir_y >= 0 else self.U_D_h
-        return u_x, u_y
+        u_x = -self.U_D_h if dir_x > 0 else self.U_D_h
+        u_y = -self.U_D_h if dir_y > 0 else self.U_D_h
+        if abs(dir_x) < self.gradient_deadband:
+            u_x = 0.0
+        if abs(dir_y) < self.gradient_deadband:
+            u_y = 0.0
+        return _clamp_horizontal_speed(u_x, u_y, self.U_D_h)
 
     def _pid_horizontal(self, x_D: float, y_D: float, x_A: float, y_A: float) -> tuple[float, float]:
         """Simple PID tracking: drive defender toward attacker horizontally."""
@@ -372,7 +479,17 @@ class DefenderControlLogic:
         ey = y_A - y_D
         ux = _clamp(self.pid_gain_h * ex, self.U_D_h)
         uy = _clamp(self.pid_gain_h * ey, self.U_D_h)
-        return ux, uy
+        return _clamp_horizontal_speed(ux, uy, self.U_D_h)
+
+    def _horizontal_command_closes_gap(
+        self,
+        u_x: float,
+        u_y: float,
+        x_rel: float,
+        y_rel: float,
+    ) -> bool:
+        """Check whether a command moves defender toward attacker in horizontal projection."""
+        return (x_rel * u_x + y_rel * u_y) < -self.gradient_deadband
 
     def _check_game_status(
         self,
@@ -445,6 +562,10 @@ def main(args=None):
                 self.declare_parameter("pid_gain_h", 2.0)
                 self.declare_parameter("margin_z_factor", 0.3)
                 self.declare_parameter("margin_h_factor", 0.3)
+                self.declare_parameter("gradient_deadband", 1e-6)
+                self.declare_parameter("command_filter_alpha", 0.35)
+                self.declare_parameter("max_accel_horizontal", 2.0)
+                self.declare_parameter("max_accel_vertical", 1.5)
 
                 vf_dir = self.get_parameter("value_function_dir").value
                 rate = self.get_parameter("control_rate").value
@@ -452,6 +573,10 @@ def main(args=None):
                 pid_h = self.get_parameter("pid_gain_h").value
                 margin_z = self.get_parameter("margin_z_factor").value
                 margin_h = self.get_parameter("margin_h_factor").value
+                gradient_deadband = self.get_parameter("gradient_deadband").value
+                self._filter_alpha = float(self.get_parameter("command_filter_alpha").value)
+                self._max_accel_h = float(self.get_parameter("max_accel_horizontal").value)
+                self._max_accel_z = float(self.get_parameter("max_accel_vertical").value)
 
                 # Load value functions
                 self._logic = None
@@ -464,6 +589,7 @@ def main(args=None):
                             pid_gain_h=pid_h,
                             margin_z_factor=margin_z,
                             margin_h_factor=margin_h,
+                            gradient_deadband=gradient_deadband,
                         )
                         self.get_logger().info(
                             f"Value functions loaded from {vf_dir}: {loader.loaded_names}"
@@ -480,6 +606,8 @@ def main(args=None):
                 self._defender_vel = None  # [vx, vy, vz]
                 self._attacker_pos = None  # [x, y, z]
                 self._attacker_vel = None  # [vx, vy, vz]
+                self._filtered_cmd = np.array([0.0, 0.0, 0.0], dtype=float)
+                self._last_filter_time = None
 
                 # Subscribers
                 self.create_subscription(
@@ -556,6 +684,7 @@ def main(args=None):
                     self._defender_vel,
                     self._attacker_pos,
                 )
+                cmd_vel = self._condition_command(cmd_vel)
 
                 # Publish cmd_vel
                 msg = Twist()
@@ -577,6 +706,35 @@ def main(args=None):
                     f"d_h={h_dist:.2f} d_z={z_dist:.2f}"
                 )
                 self._status_pub.publish(status_msg)
+
+            def _condition_command(self, cmd_vel):
+                """Rate-limit and smooth outgoing ROS commands before PX4 sees them."""
+                now = self.get_clock().now().nanoseconds / 1e9
+                if self._last_filter_time is None:
+                    self._last_filter_time = now
+                dt = max(0.001, min(0.2, now - self._last_filter_time))
+                self._last_filter_time = now
+
+                target = np.array(cmd_vel, dtype=float)
+                target[0], target[1] = _clamp_horizontal_speed(
+                    float(target[0]), float(target[1]), self._logic.U_D_h
+                )
+                target[2] = _clamp(float(target[2]), self._logic.U_D_z)
+
+                max_delta = np.array([
+                    self._max_accel_h * dt,
+                    self._max_accel_h * dt,
+                    self._max_accel_z * dt,
+                ])
+                delta = np.clip(target - self._filtered_cmd, -max_delta, max_delta)
+                limited = self._filtered_cmd + delta
+                alpha = max(0.0, min(1.0, self._filter_alpha))
+                self._filtered_cmd = (1.0 - alpha) * self._filtered_cmd + alpha * limited
+                self._filtered_cmd[0], self._filtered_cmd[1] = _clamp_horizontal_speed(
+                    float(self._filtered_cmd[0]), float(self._filtered_cmd[1]), self._logic.U_D_h
+                )
+                self._filtered_cmd[2] = _clamp(float(self._filtered_cmd[2]), self._logic.U_D_z)
+                return self._filtered_cmd.copy()
 
             def _publish_hover(self):
                 """Publish zero velocity (hover)."""
