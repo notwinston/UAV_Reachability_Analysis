@@ -28,6 +28,8 @@ from reach_avoid_game.solvers.control_extraction import (
 GRADIENT_DEADBAND = 1e-6
 VERTICAL_PID_GAIN = 8.0
 HORIZONTAL_PID_GAIN = 2.0
+HORIZONTAL_HJ_MIN_CLOSURE_FRACTION = 0.85
+ATTACKER_TARGET_ALTITUDE = 10.0
 
 
 def _clamp_horizontal_speed(cmd_x, cmd_y, speed_limit):
@@ -42,6 +44,25 @@ def _clamp_horizontal_speed(cmd_x, cmd_y, speed_limit):
 def _is_closing_horizontal_gap(cmd_x, cmd_y, x_rel, y_rel):
     """Return True when defender horizontal command reduces defender-attacker gap."""
     return (x_rel * cmd_x + y_rel * cmd_y) < -GRADIENT_DEADBAND
+
+
+def _horizontal_closing_speed(cmd_x, cmd_y, x_rel, y_rel):
+    """Projected closure rate along the defender-attacker line."""
+    dist = math.hypot(x_rel, y_rel)
+    if dist < GRADIENT_DEADBAND:
+        return 0.0
+    return -(x_rel * cmd_x + y_rel * cmd_y) / dist
+
+
+def _horizontal_command_is_useful(cmd_x, cmd_y, pid_x, pid_y, x_rel, y_rel):
+    """Accept coarse-grid HJ commands only when they close nearly as well as pursuit."""
+    hj_closure = _horizontal_closing_speed(cmd_x, cmd_y, x_rel, y_rel)
+    if hj_closure <= GRADIENT_DEADBAND:
+        return False
+    pid_closure = _horizontal_closing_speed(pid_x, pid_y, x_rel, y_rel)
+    if pid_closure <= GRADIENT_DEADBAND:
+        return True
+    return hj_closure >= HORIZONTAL_HJ_MIN_CLOSURE_FRACTION * pid_closure
 
 
 def _is_closing_vertical_gap(cmd_z, z_rel):
@@ -312,7 +333,7 @@ def _extract_horizontal_control(
             if abs(direction_y) < GRADIENT_DEADBAND:
                 u_y = 0.0
             u_x, u_y = _clamp_horizontal_speed(u_x, u_y, u_d_h)
-            if not _is_closing_horizontal_gap(u_x, u_y, x_rel, y_rel):
+            if not _horizontal_command_is_useful(u_x, u_y, pid_x, pid_y, x_rel, y_rel):
                 return pid_x, pid_y, 2
             return u_x, u_y, 0
 
@@ -338,30 +359,63 @@ def _extract_horizontal_control(
             if abs(direction_y) < GRADIENT_DEADBAND:
                 u_y = 0.0
             u_x, u_y = _clamp_horizontal_speed(u_x, u_y, u_d_h)
-            if not _is_closing_horizontal_gap(u_x, u_y, x_rel, y_rel):
+            if not _horizontal_command_is_useful(u_x, u_y, pid_x, pid_y, x_rel, y_rel):
                 return pid_x, pid_y, 2
             return u_x, u_y, 1
 
 
-def _extract_horizontal_disturbance(phi_h_data, state_h, u_a_h):
-    """Extract attacker optimal horizontal disturbance.
+def _target_center(config):
+    tr = config.target_region
+    return 0.5 * (tr.x_min + tr.x_max), 0.5 * (tr.y_min + tr.y_max)
 
-    Attacker minimizes value function.
-    """
-    state_h_clamped = np.clip(state_h, phi_h_data.grid_min, phi_h_data.grid_max)
-    grad = compute_gradient(phi_h_data, state_h_clamped)
-    # Attacker minimizes: d direction = -sign of gradient wrt attacker position
-    direction_x = grad[4]  # dV/dx_A
-    direction_y = grad[5]  # dV/dy_A
-    if abs(direction_x) < GRADIENT_DEADBAND:
-        d_x = 0.0
-    else:
-        d_x = -u_a_h if direction_x > 0 else u_a_h
-    if abs(direction_y) < GRADIENT_DEADBAND:
-        d_y = 0.0
-    else:
-        d_y = -u_a_h if direction_y > 0 else u_a_h
-    return d_x, d_y
+
+def _point_in_target_region(config, x, y):
+    tr = config.target_region
+    return tr.x_min <= x <= tr.x_max and tr.y_min <= y <= tr.y_max
+
+
+def _obstacle_aware_target_point(config, x_a, y_a, obstacle_margin=3.0):
+    """Return the next target-directed waypoint that avoids the box obstacle."""
+    target_x, target_y = _target_center(config)
+    if not config.obstacles:
+        return target_x, target_y
+
+    obs = config.obstacles[0]
+    pre_x = obs.x_min - obstacle_margin - 0.5
+    post_x = obs.x_max + obstacle_margin + 0.5
+    if not (x_a < post_x and target_x > obs.x_max):
+        return target_x, target_y
+
+    bottom_y = max(config.room.y_min + 1.5, obs.y_min - obstacle_margin - 0.5)
+    top_y = min(config.room.y_max - 1.5, obs.y_max + obstacle_margin + 0.5)
+    # The paper arena target sits below the obstacle's top half; using the
+    # lower corridor preserves initial progress toward the target y-coordinate.
+    corridor_y = bottom_y if target_y <= 0.5 * (obs.y_min + obs.y_max) else top_y
+
+    if x_a < pre_x:
+        return pre_x, corridor_y
+    return post_x, corridor_y
+
+
+def _extract_target_reaching_disturbance(config, x_a, y_a, u_a_h):
+    """Target-directed attacker policy used by the paper-figure simulations."""
+    if _point_in_target_region(config, x_a, y_a):
+        return 0.0, 0.0
+    target_x, target_y = _obstacle_aware_target_point(config, x_a, y_a)
+    dx = target_x - x_a
+    dy = target_y - y_a
+    dist = math.hypot(dx, dy)
+    if dist < GRADIENT_DEADBAND:
+        return 0.0, 0.0
+    return (dx / dist) * u_a_h, (dy / dist) * u_a_h
+
+
+def _extract_target_altitude_disturbance(z_a, u_a_z, target_altitude=ATTACKER_TARGET_ALTITUDE):
+    """Move the attacker toward the target cruise altitude."""
+    dz = target_altitude - z_a
+    if abs(dz) < 0.05:
+        return 0.0
+    return float(np.clip(2.0 * dz, -u_a_z, u_a_z))
 
 
 def run_combined_sim(
@@ -489,7 +543,7 @@ def run_combined_sim(
                 u_z = np.clip(VERTICAL_PID_GAIN * (z_a - z_d), -u_d_z, u_d_z)
                 mode_z = 2
 
-        d_z_ctrl = extract_optimal_disturbance_vertical(phi_z_data, state_z_3d_c, u_a_z)
+        d_z_ctrl = _extract_target_altitude_disturbance(z_a, u_a_z)
 
         # --- Horizontal control (Algorithm 2) ---
         u_x, u_y, mode_h = _extract_horizontal_control(
@@ -497,7 +551,7 @@ def run_combined_sim(
             state_h, state_h_rel,
             k_x, k_y, u_d_h, d_h,
         )
-        d_x, d_y = _extract_horizontal_disturbance(phi_h_data, state_h, u_a_h)
+        d_x, d_y = _extract_target_reaching_disturbance(config, x_a, y_a, u_a_h)
 
         # Apply wall-avoidance safety layer to defender controls
         wa = _apply_wall_avoidance(

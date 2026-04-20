@@ -72,6 +72,7 @@ def main(args=None):
                 self.declare_parameter('max_speed_horizontal', 3.0)
                 self.declare_parameter('max_speed_vertical', 0.6)
                 self.declare_parameter('altitude_hold_gain', 0.8)
+                self.declare_parameter('altitude_hold_enabled', True)
                 # fmu_topic_prefix: PX4 UXRCE namespace, e.g. 'defender' -> /defender/fmu/in/...
 
                 self.vehicle_id = self.get_parameter('vehicle_id').value
@@ -110,6 +111,7 @@ def main(args=None):
                 self._max_speed_h = float(self.get_parameter('max_speed_horizontal').value)
                 self._max_speed_z = float(self.get_parameter('max_speed_vertical').value)
                 self._altitude_hold_gain = float(self.get_parameter('altitude_hold_gain').value)
+                self._altitude_hold_enabled = bool(self.get_parameter('altitude_hold_enabled').value)
 
                 qos_sub = QoSProfile(
                     reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -333,7 +335,11 @@ def main(args=None):
                 vz = _clamp(vz, -max_v, max_v)
                 vx, vy, vz = self._smooth_command(vx, vy, vz)
                 vz = self._altitude_hold_command(vz)
-                if self._position_enu is not None and self._position_enu[2] < self._target_altitude - 0.75:
+                if (
+                    self._altitude_hold_enabled
+                    and self._position_enu is not None
+                    and self._position_enu[2] < self._target_altitude - 0.75
+                ):
                     vx, vy = 0.0, 0.0
                 vx, vy, vz = self._apply_geofence_projection(vx, vy, vz)
                 vx, vy = self._apply_obstacle_projection(vx, vy)
@@ -342,6 +348,8 @@ def main(args=None):
 
             def _altitude_hold_command(self, requested_vz):
                 """Keep SITL vehicles near their spawn altitude to avoid vertical runaway."""
+                if not self._altitude_hold_enabled:
+                    return requested_vz
                 if self._position_enu is None:
                     return requested_vz
                 target_z = _clamp(

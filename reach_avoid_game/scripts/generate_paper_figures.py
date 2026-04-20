@@ -456,11 +456,36 @@ def _load_numerical_sim():
     return mod.run_combined_sim
 
 
-def fig11_simulation_trajectories(vf_dir, output_dir, config):
-    """Fig 11 — Simulation trajectories: x-y and z-t side by side."""
-    run_combined_sim = _load_numerical_sim()
+def _parse_start_pose(value):
+    parts = [float(part.strip()) for part in value.split(",")]
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError(
+            f"start pose must be formatted as x,y,z, got {value!r}"
+        )
+    return parts
 
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+
+def _run_combined_for_fig(config, vf_dir, sim_start=None):
+    """Run the shared paper simulation with optional CLI-provided starts."""
+    run_combined_sim = _load_numerical_sim()
+    kwargs = {}
+    if sim_start is not None:
+        kwargs = {
+            "initial_defender_pos": sim_start["defender"],
+            "initial_attacker_pos": sim_start["attacker"],
+        }
+    return run_combined_sim(
+        config,
+        str(vf_dir),
+        dt=0.01,
+        T=SIMULATION_HORIZON_SECONDS,
+        **kwargs,
+    )
+
+
+def fig11_simulation_trajectories(vf_dir, output_dir, config, sim_start=None):
+    """Fig 11 — Simulation trajectories: x-y and z-t side by side."""
+    traj = _run_combined_for_fig(config, vf_dir, sim_start)
     if traj.get("obstacle_violation", False):
         raise ValueError("combined simulation trajectory enters an obstacle")
 
@@ -527,11 +552,9 @@ def fig11_simulation_trajectories(vf_dir, output_dir, config):
     print("  Saved fig_11.png (simulation trajectories)")
 
 
-def fig12_combined_3d(vf_dir, output_dir, config):
+def fig12_combined_3d(vf_dir, output_dir, config, sim_start=None):
     """Fig 12 — Combined 3D game view: 3D plot of both drone paths."""
-    run_combined_sim = _load_numerical_sim()
-
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+    traj = _run_combined_for_fig(config, vf_dir, sim_start)
     if traj.get("obstacle_violation", False):
         raise ValueError("combined simulation trajectory enters an obstacle")
 
@@ -648,10 +671,9 @@ def fig_vertical_winning_regions(vf_dir, output_dir, config):
     print("  Saved fig_vertical_winning.png")
 
 
-def fig_distance_over_time(vf_dir, output_dir, config):
+def fig_distance_over_time(vf_dir, output_dir, config, sim_start=None):
     """Analysis — 3D, horizontal, and vertical inter-agent distances vs time."""
-    run_combined_sim = _load_numerical_sim()
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+    traj = _run_combined_for_fig(config, vf_dir, sim_start)
 
     dt = traj["dt"]
     n = len(traj["x_d"])
@@ -695,10 +717,9 @@ def fig_distance_over_time(vf_dir, output_dir, config):
     print("  Saved fig_distance_over_time.png")
 
 
-def fig_control_effort(vf_dir, output_dir, config):
+def fig_control_effort(vf_dir, output_dir, config, sim_start=None):
     """Analysis — Defender control inputs (u_x, u_y, u_z) and attacker disturbances over time."""
-    run_combined_sim = _load_numerical_sim()
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+    traj = _run_combined_for_fig(config, vf_dir, sim_start)
 
     dt = traj["dt"]
     n = len(traj["u_x"])
@@ -755,10 +776,9 @@ def fig_control_effort(vf_dir, output_dir, config):
     print("  Saved fig_control_effort.png")
 
 
-def fig_speed_profiles(vf_dir, output_dir, config):
+def fig_speed_profiles(vf_dir, output_dir, config, sim_start=None):
     """Analysis — Speed magnitude profiles for defender and attacker over time."""
-    run_combined_sim = _load_numerical_sim()
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+    traj = _run_combined_for_fig(config, vf_dir, sim_start)
 
     dt = traj["dt"]
     n = len(traj["v_dx"])
@@ -804,10 +824,9 @@ def fig_speed_profiles(vf_dir, output_dir, config):
     print("  Saved fig_speed_profiles.png")
 
 
-def fig_mode_timeline(vf_dir, output_dir, config):
+def fig_mode_timeline(vf_dir, output_dir, config, sim_start=None):
     """Analysis — Color-coded control mode timeline for horizontal and vertical sub-games."""
-    run_combined_sim = _load_numerical_sim()
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+    traj = _run_combined_for_fig(config, vf_dir, sim_start)
 
     dt = traj["dt"]
     n = len(traj["mode_z"])
@@ -845,10 +864,9 @@ def fig_mode_timeline(vf_dir, output_dir, config):
     print("  Saved fig_mode_timeline.png")
 
 
-def fig_altitude_phase_portrait(vf_dir, output_dir, config):
+def fig_altitude_phase_portrait(vf_dir, output_dir, config, sim_start=None):
     """Analysis — z_D vs z_A phase portrait showing altitude trajectory and capture zone."""
-    run_combined_sim = _load_numerical_sim()
-    traj = run_combined_sim(config, str(vf_dir), dt=0.01, T=SIMULATION_HORIZON_SECONDS)
+    traj = _run_combined_for_fig(config, vf_dir, sim_start)
 
     z_d = traj["z_d"]
     z_a = traj["z_a"]
@@ -897,6 +915,10 @@ def main():
     parser.add_argument("--config", default="/workspace/config/game_params.yaml",
                         help="Path to game configuration YAML")
     parser.add_argument("--preset", default="dev", help="Preset name (for info only)")
+    parser.add_argument("--defender-start", type=_parse_start_pose, default=None,
+                        help="Initial defender pose for simulation figures as x,y,z")
+    parser.add_argument("--attacker-start", type=_parse_start_pose, default=None,
+                        help="Initial attacker pose for simulation figures as x,y,z")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -904,9 +926,20 @@ def main():
     vf_dir = Path(args.vf_dir)
     config = GameConfig.from_yaml(args.config)
     config.apply_preset(args.preset)
+    sim_start = None
+    if args.defender_start is not None or args.attacker_start is not None:
+        sim_start = {
+            "defender": args.defender_start or [35.0, 20.0, 8.0],
+            "attacker": args.attacker_start or [5.0, 3.0, 3.0],
+        }
 
     print(f"Generating paper figures from {vf_dir}")
     print(f"Output directory: {output_dir}")
+    if sim_start is not None:
+        print(
+            "Simulation starts: "
+            f"defender={sim_start['defender']}, attacker={sim_start['attacker']}"
+        )
     print()
 
     # Check prerequisites
@@ -943,6 +976,15 @@ def main():
         ("Altitude Phase Portrait", fig_altitude_phase_portrait,
          ["phi_z.npz", "V_z_inf.npz", "B_z.npz", "phi_h.npz", "V_h_T_6d.npz"]),
     ]
+    simulation_figures = {
+        "Fig 11",
+        "Fig 12",
+        "Distance Over Time",
+        "Control Effort",
+        "Speed Profiles",
+        "Mode Timeline",
+        "Altitude Phase Portrait",
+    }
 
     generated = 0
     for name, func, deps in figure_funcs:
@@ -963,7 +1005,10 @@ def main():
             )
             continue
         try:
-            func(vf_dir, output_dir, config)
+            if name in simulation_figures:
+                func(vf_dir, output_dir, config, sim_start)
+            else:
+                func(vf_dir, output_dir, config)
             generated += 1
         except Exception as e:
             print(f"  ERROR generating {name}: {e}")

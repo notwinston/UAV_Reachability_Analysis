@@ -47,6 +47,7 @@ class DefenderControlLogic:
         margin_z_factor: float = 0.3,
         margin_h_factor: float = 0.3,
         gradient_deadband: float = 1e-6,
+        min_hj_closure_fraction: float = 0.85,
     ):
         self.loader = loader
         self.pid_gain_z = pid_gain_z
@@ -54,6 +55,7 @@ class DefenderControlLogic:
         self.margin_z_factor = margin_z_factor
         self.margin_h_factor = margin_h_factor
         self.gradient_deadband = gradient_deadband
+        self.min_hj_closure_fraction = min_hj_closure_fraction
 
         # Extract game parameters from value functions
         z_params = loader.get_params("phi_z") if "phi_z" in loader.loaded_names else {}
@@ -410,7 +412,7 @@ class DefenderControlLogic:
             if in_winning and "phi_h" in self.loader.loaded_names:
                 # Mode 2: In winning region, optimal reaching from phi_h
                 u_x, u_y = self._optimal_reaching_horizontal(horizontal_state)
-                if self._horizontal_command_closes_gap(u_x, u_y, x_rel, y_rel):
+                if self._horizontal_command_is_useful(u_x, u_y, x_rel, y_rel, x_D, y_D, x_A, y_A):
                     return u_x, u_y, "reaching"
                 return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_pursuit"
             # Outside winning region or no VF: PID pursuit toward attacker
@@ -424,7 +426,7 @@ class DefenderControlLogic:
             if near_boundary:
                 # Mode 3: Optimal tracking from V_h_T gradient
                 u_x, u_y = self._optimal_tracking_horizontal(h_tracking_state)
-                if self._horizontal_command_closes_gap(u_x, u_y, x_rel, y_rel):
+                if self._horizontal_command_is_useful(u_x, u_y, x_rel, y_rel, x_D, y_D, x_A, y_A):
                     return u_x, u_y, "tracking"
                 return *self._pid_horizontal(x_D, y_D, x_A, y_A), "pid_pursuit"
 
@@ -490,6 +492,46 @@ class DefenderControlLogic:
     ) -> bool:
         """Check whether a command moves defender toward attacker in horizontal projection."""
         return (x_rel * u_x + y_rel * u_y) < -self.gradient_deadband
+
+    def _horizontal_closing_speed(
+        self,
+        u_x: float,
+        u_y: float,
+        x_rel: float,
+        y_rel: float,
+    ) -> float:
+        """Projected closure rate along the defender-attacker line."""
+        dist = math.hypot(x_rel, y_rel)
+        if dist < self.gradient_deadband:
+            return 0.0
+        return -(x_rel * u_x + y_rel * u_y) / dist
+
+    def _horizontal_command_is_useful(
+        self,
+        u_x: float,
+        u_y: float,
+        x_rel: float,
+        y_rel: float,
+        x_D: float,
+        y_D: float,
+        x_A: float,
+        y_A: float,
+    ) -> bool:
+        """Accept HJ commands only when they are competitive with pursuit.
+
+        Coarse 6D gradients can point diagonally even when the attacker is
+        straight ahead. Keeping the HJ command only when its line-of-sight
+        closure is close to the PID pursuit closure preserves useful HJ
+        behavior while avoiding arbitrary lateral drift.
+        """
+        hj_closure = self._horizontal_closing_speed(u_x, u_y, x_rel, y_rel)
+        if hj_closure <= self.gradient_deadband:
+            return False
+        pid_x, pid_y = self._pid_horizontal(x_D, y_D, x_A, y_A)
+        pid_closure = self._horizontal_closing_speed(pid_x, pid_y, x_rel, y_rel)
+        if pid_closure <= self.gradient_deadband:
+            return True
+        return hj_closure >= self.min_hj_closure_fraction * pid_closure
 
     def _check_game_status(
         self,
@@ -563,6 +605,7 @@ def main(args=None):
                 self.declare_parameter("margin_z_factor", 0.3)
                 self.declare_parameter("margin_h_factor", 0.3)
                 self.declare_parameter("gradient_deadband", 1e-6)
+                self.declare_parameter("min_hj_closure_fraction", 0.85)
                 self.declare_parameter("command_filter_alpha", 0.35)
                 self.declare_parameter("max_accel_horizontal", 2.0)
                 self.declare_parameter("max_accel_vertical", 1.5)
@@ -574,6 +617,7 @@ def main(args=None):
                 margin_z = self.get_parameter("margin_z_factor").value
                 margin_h = self.get_parameter("margin_h_factor").value
                 gradient_deadband = self.get_parameter("gradient_deadband").value
+                min_hj_closure_fraction = self.get_parameter("min_hj_closure_fraction").value
                 self._filter_alpha = float(self.get_parameter("command_filter_alpha").value)
                 self._max_accel_h = float(self.get_parameter("max_accel_horizontal").value)
                 self._max_accel_z = float(self.get_parameter("max_accel_vertical").value)
@@ -590,6 +634,7 @@ def main(args=None):
                             margin_z_factor=margin_z,
                             margin_h_factor=margin_h,
                             gradient_deadband=gradient_deadband,
+                            min_hj_closure_fraction=min_hj_closure_fraction,
                         )
                         self.get_logger().info(
                             f"Value functions loaded from {vf_dir}: {loader.loaded_names}"

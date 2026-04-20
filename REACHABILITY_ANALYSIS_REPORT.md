@@ -1,394 +1,568 @@
 # Reachability Replication Analysis Report
 
-Generated: 2026-04-18
+Generated: 2026-04-20
+
+Paper target: `Reachability.pdf`, arXiv:2512.22793v1, "Reach-Avoid Differential game with Reachability Analysis for UAVs: A decomposition approach" by Minh Bui, Simon Monckton, and Mo Chen.
 
 ## Executive Summary
 
-The current repo does **not** faithfully replicate `Reachability.pdf` yet. The drone behavior problems are mainly caused by value-function semantics being inverted or patched around, not by small simulation tuning errors.
+The current repo still does **not** faithfully reproduce the paper behavior in simulation. The most important reason has changed since the previous report: several old sign and threshold problems have been partially fixed, but the checked-in "paper-valid" value functions are now partly **surrogate formulas**, not Hamilton-Jacobi value functions from the paper.
 
-The most important issues are:
+The highest-impact issues are:
 
-1. The project is **not actually using the local `optimized_dp` repo**. The local `optimized_dp/` directory is empty, `odp` is not installed in the current environment, and the solver wrapper delegates to `hj_reachability` (`reach_avoid_game/src/reach_avoid_game/odp/solver.py:1-15`, `:183-195`). The package dependency explicitly requires `hj-reachability==0.7.0` (`reach_avoid_game/pyproject.toml:11-18`).
-2. The **vertical reach-avoid game has the player roles reversed** relative to the paper. The paper states that in the vertical game the defender minimizes the relative-distance value and the attacker maximizes it. The code sets `control_mode="max"` and `disturbance_mode="min"` for `VerticalGameDynamics` (`vertical_game.py:35-38`), and the defender controller uses the same maximizing sign (`defender_node.py:249-257`).
-3. The **horizontal game is not formulated like the paper's horizontal reach-avoid game**. The code uses capture as the HJ target (`horizontal_solver.py:221-222`) and obstacles as avoid constraints (`:224-233`). In the paper's original horizontal RA game, the attacker's target/defender obstacle are the attacker's reach set, while defender capture/attacker obstacle are the avoid set. The paper's horizontal winning convention is also `W_A,h = {Phi_h <= 0}` and `W_D,h = {Phi_h > 0}`, while the code treats `phi_h <= 0` as defender-winning (`winning_conditions.py:185-188`, `defender_node.py:304-309`, `:410-412`).
-4. The invariant capture sets `B_z` and `B_h` are being **artificially expanded** because the computed maximum-distance value functions do not reach the requested capture thresholds. `V_z_inf.min()` is about `3.425` while `d_z=1`, so `B_z` is thresholded at `3.596` instead of `1` (`vertical_solver.py:230-232`). `V_h_T.min()` is about `6.156` while `d_h=3`, so `B_h` is thresholded at `6.464` instead of `3` (`horizontal_solver.py:360-362`). This violates the intended invariant-set definition `B = {V <= d}`.
-5. The saved `B_z` and `B_h` masks are not subsets of the physical capture sets. In the saved data, `160/293` `B_z` cells are outside `|z_rel| <= 1`, and `68/529` `B_h` cells are outside horizontal distance `<= 3`. The paper explicitly expects invariant capture sets to be subsets of the original capture sets.
-6. The online controller often enters "tracking" with a zero gradient and commands full-speed motion in an arbitrary direction. At equal altitude with zero vertical relative speed, `V_z_inf(0,0) ~= 3.425`, the gradient is effectively zero, and `_optimal_tracking_vertical` returns `-U_D_z` because it treats `direction >= 0` as negative full speed (`defender_node.py:259-268`). This explains strange vertical drone behavior even when the drones are already vertically aligned.
-7. The horizontal value function is extremely coarse: saved `phi_h` has shape `(9, 7, 5, 5, 9, 7)` and only `32/99225` grid cells are negative. Starting from the launch state, the controller reports `in_W_D_h=False` and falls back to PID pursuit rather than HJ reach-track control.
+1. `V_z_inf`, `V_h_T`, and `V_h_T_6d` are no longer true HJ maximum-distance solves. They are hand-constructed conservative values such as `abs(z_rel) + velocity_penalty` and `distance + speed_penalty`. They may be useful safety heuristics, but they do not prove the paper's invariant-set guarantees.
+2. These surrogate artifacts are marked `paper_valid=True` in metadata, so the loader/controller trusts them as if they came from the paper's HJ computations.
+3. The attacker "optimal" mode does not primarily optimize direct progress to the goal. It uses `phi_h` gradients as the main horizontal objective and only falls back to goal seeking when gradients are near zero or value functions/state are unavailable.
+4. At the launch state, the attacker's `phi_h` gradient implies a command of approximately `(3, 3)` before filtering, while the target direction from `(5, 20)` to `(41.5, 12.5)` is positive x and negative y. This directly explains why the attacker can move away from the intended goal path.
+5. The defender's HJ horizontal command at the launch state is approximately `(4.24, 4.24)`, which closes the y gap but adds arbitrary positive x motion even when both drones have the same x coordinate. This comes from coarse/surrogate `phi_h` gradients.
+6. The PX4 simulation layer strongly suppresses the game commands. `simulation.launch.py` gives the PX4 adapter caps of `1.5 m/s` horizontal and `0.6 m/s` vertical, far below the game parameters `U_D^h=6`, `U_D^z=4`, `U_A^h=3`, `U_A^z=2`. The adapter can also override vertical commands with altitude hold and zero horizontal motion while below target altitude.
+7. The latest recorded Gazebo run did not capture the attacker: `capture_samples=0`, `attacker_target_samples=0`, and `min_horizontal_distance=6.351266782095096`.
+8. The environment cannot currently recompute real HJ value functions: `odp`, `jax`, and `heterocl` are absent. The solver tests that require `odp` are skipped, so the most important paper-fidelity tests are not actually exercising the solver.
 
-## Paper Requirements Versus Repo State
+Bottom line: the observed drone behavior is not primarily a small tuning bug. The repo is mixing paper labels with non-paper value-function construction, very coarse 6D grids, an attacker objective that is not direct goal seeking, and PX4 safety/altitude filters that substantially alter both players' commanded velocities.
 
-`Reachability.pdf` decomposes the 9D game into:
+## Paper Requirements
 
-- A 6D horizontal sub-game with state `[x_D, y_D, v_Dx, v_Dy, x_A, y_A]`.
-- A 3D vertical sub-game with state `[z_D, v_Dz, z_A]`.
-- A 2D vertical maximum-distance value function `V_z,inf(z_rel, v_Dz)`.
-- A horizontal maximum-distance value function `V_h,T` or `V_h,inf`, with obstacle-aware tracking if using Algorithm 2.
-- Invariant sets:
-  - `B_z = {x_rel_z | V_z,inf(x_rel_z) <= d_z}`
-  - `B_h = {x_h | V_h,inf(x_h) <= d_h}` or finite-horizon `V_h,T` for the paper's horizontal experiment.
+The paper decomposes a 9D two-drone game into horizontal and vertical sub-games. The defender is modeled as a double integrator and the attacker as a single integrator:
 
-The repo has files for all these concepts, but the implementation semantics diverge:
+- Defender: velocity command affects acceleration, `v_dot = k * (u - v)`.
+- Attacker: commanded velocity is applied directly.
+- Horizontal controls are bounded by Euclidean speed: `sqrt(u_x^2 + u_y^2) <= U^h`.
+- Vertical controls are bounded by scalar speed: `abs(u_z) <= U^z`.
+- The paper uses a defender that is twice as fast as the attacker:
+  - `U_D^h = 6 m/s`, `U_A^h = 3 m/s`
+  - `U_D^z = 4 m/s`, `U_A^z = 2 m/s`
+  - `k_x = k_y = 0.7`, `k_z = 1.5`
 
-- `V_z_inf` and `V_h_T` are computed, but their minimum values are already larger than the capture thresholds, so the code expands the thresholds.
-- `phi_z` is computed from expanded `B_z`, not the requested `d_z`.
-- `phi_h` is not the same object as the paper's horizontal `Phi_h`; it is closer to a defender-capture BRT with obstacle penalties, but the rest of the code still labels it as the paper value function.
-- `V_h_T_6d.npz` exists, but `B_h` and the defender controller use the 4D relative `V_h_T`, so online horizontal tracking does not carry the paper's obstacle-aware invariant guarantee.
+Capture is decomposed into simultaneous horizontal and vertical conditions:
 
-## OptimizedDP / `hj_reachability` Status
+- Horizontal: `sqrt((x_A - x_D)^2 + (y_A - y_D)^2) <= d_h`
+- Vertical: `abs(z_A - z_D) <= d_z`
+- Paper experiment values: `d_h = 3`, `d_z = 1`
 
-### What the repo claims
+For the horizontal game, the paper's reach and avoid sets are not simply "defender captures attacker." The paper defines:
 
-The README says the technical stack uses `hj_reachability v0.7.0`, while `reach_avoid_game/pyproject.toml` says "OptimizedDP" in comments and description but depends on `jax[cpu]` and `hj-reachability==0.7.0`.
+- `R_h`: attacker reaches the target, or defender hits an obstacle/wall.
+- `A_h`: defender captures/tracks the attacker before the attacker is in the target, or attacker hits an obstacle/wall.
+- Winning regions:
+  - attacker-winning: `W_A,h = {Phi_h <= 0}`
+  - defender-winning: `W_D,h = {Phi_h > 0}`
 
-### What the code actually does
+For the vertical game:
 
-- `reach_avoid_game/src/reach_avoid_game/odp/solver.py` imports `hj_reachability as hj` and calls `hj.solve`.
-- `reach_avoid_game/src/reach_avoid_game/odp/grid.py` tries `from odp.Grid import Grid`, but falls back to a local NumPy grid if `odp` is unavailable.
-- The local `optimized_dp/` directory is empty.
-- In the current environment:
-  - `hj_reachability`: not installed
-  - `odp`: not installed
-  - `jax`: not installed
-  - `numpy` and `scipy`: installed
-
-Conclusion: the repo is **not using SFU-MARS/optimized_dp** for value-function computation. It is using an "OptimizedDP-compatible" API name around an `hj_reachability` backend, and in this environment even that backend cannot currently run.
-
-This matters because OptimizedDP and `hj_reachability` have different APIs, defaults, time conventions, and reach-avoid postprocessor expectations. A wrapper can work, but only if every sign convention and target/avoid convention is verified. That verification is currently missing.
-
-## Value Function Findings
-
-### Saved Value Function Inventory
-
-From `data/value_functions`:
-
-| File | Shape | Min | Max | Notes |
-|---|---:|---:|---:|---|
-| `phi_z.npz` | `(24, 10, 24)` | `-0.2148` | `96.4036` | Vertical reach-track value, computed on dev grid |
-| `phi_z_time_slices.npz` | `(101, 24, 10, 24)` | `-0.5892` | `96.4036` | Time slices exist |
-| `V_z_inf.npz` | `(51, 31)` | `3.4251` | `12.2580` | Minimum exceeds `d_z=1` |
-| `B_z.npz` | `(51, 31)` | `0` | `1` | Uses effective threshold `3.5964` |
-| `phi_h.npz` | `(9, 7, 5, 5, 9, 7)` | `-0.3078` | `48.4781` | Only `32/99225` negative cells |
-| `V_h_T.npz` | `(21, 21, 11, 11)` | `6.1559` | `14.2377` | Minimum exceeds `d_h=3` |
-| `B_h.npz` | `(21, 21, 11, 11)` | `0` | `1` | Uses effective threshold `6.4637` |
-| `V_h_T_6d.npz` | `(9, 7, 5, 5, 9, 7)` | `16.0933` | `1852.64` | Exists but not used by controller |
-| `phi_A_reach.npz` | `(21, 13)` | `-2.5` | `8.3134` | Used only for analysis/fallback, not the optimal attacker mode's main objective |
-
-### `V_z_inf` Is Not Usable As `B_z = {V_z_inf <= d_z}`
-
-The paper uses `B_z = {V_z,inf <= d_z}` and chooses `d_z = 1` with a nonempty invariant set. In this repo, `V_z_inf.min() = 3.4251`, so the mathematically correct `B_z = {V_z_inf <= 1}` is empty.
-
-The code responds by changing the threshold:
-
-```python
-d_z_effective = max(d_z, v_min * 1.05)
-```
-
-That makes `B_z` nonempty, but it is no longer the set that guarantees vertical capture within `d_z=1`. This is the central reason the controller can think it is "inside B_z" while physical vertical capture is not guaranteed.
-
-### `V_h_T` Has The Same Problem
-
-The paper's horizontal finite-horizon invariant set is extracted with `d_h=3`. In this repo, `V_h_T.min() = 6.1559`, so the mathematically correct `B_h = {V_h_T <= 3}` is empty.
-
-The code expands to `d_h_effective = 6.4637`, again producing a non-paper set. This makes the online controller switch into tracking/PID modes in states that are outside the actual horizontal capture cylinder.
-
-### `B_z` And `B_h` Are Not Subsets Of The Capture Sets
-
-The paper says `B_z` is generally a subset of the vertical capture set `C_z`, and the same intuition applies to `B_h`.
-
-Saved data contradicts this:
-
-- `B_z`: `293` cells are marked inside; `160` are outside `|z_rel| <= 1`.
-- `B_h`: `529` cells are marked inside; `68` are outside `sqrt(x_rel^2 + y_rel^2) <= 3`.
-
-That means the controller's "captured/tracking" state machine is sometimes using an invariant set larger than the physical capture condition.
-
-### `phi_h` Is Too Sparse And Too Coarse For Reliable Control
-
-The active config uses `grid_preset: dev` (`config/game_params.yaml:32`), giving the 6D horizontal grid only:
-
-- `x_D`: 9 points across 45 m
-- `y_D`: 7 points across 25 m
-- `v_Dx`: 5 points
-- `v_Dy`: 5 points
-- `x_A`: 9 points
-- `y_A`: 7 points
-
-This is far too coarse to extract stable gradients for bang-bang control in a 45 m by 25 m arena. It also explains why almost the entire grid is classified outside `phi_h <= 0`.
-
-The launch initial state is:
-
-- Defender: `(5.0, 12.5, 3.0)`
-- Attacker: `(5.0, 20.0, 3.0)`
-
-At that state, `phi_h ~= 4.11`, so the defender controller treats horizontal as not winning and uses PID pursuit instead of HJ reaching.
-
-## Dynamics And Game-Role Issues
-
-### Vertical Role Sign Is Wrong
-
-Paper vertical game:
-
-- Defender minimizes relative-distance value.
+- `Phi_z` is a defender-capture value function.
+- Defender minimizes the vertical relative-distance value.
 - Attacker maximizes it.
-- Defender vertical optimal control is an `arg min`.
+- Winning regions:
+  - defender-winning: `W_D,z = {Phi_z <= 0}`
+  - attacker-winning: `W_A,z = {Phi_z > 0}`
 
-Code:
+The key paper idea is not just solving `Phi_h` and `Phi_z`. It also computes invariant capture/tracking sets:
 
-- `VerticalGameDynamics` sets `control_mode="max"`, `disturbance_mode="min"`.
-- `opt_ctrl_numpy`, `optCtrl_inPython`, and the online controller choose `+U` when `dV/dv_Dz * k_z >= 0`.
-- The attacker controller also says the attacker minimizes `phi_z`.
+- Vertical maximum-distance value:
+  - `V_z(x_z_rel, t) = sup_A inf_D max_tau |z_rel(tau)|`
+  - `B_z = {x_z_rel | V_z,inf(x_z_rel) <= d_z}`
+- Horizontal maximum-distance value:
+  - `V_h(x_h, t) = sup_A inf_D max_tau l_h(x_h(tau))`
+  - `l_h` includes relative distance and a large obstacle penalty for defender obstacle collisions.
+  - `B_h = {x_h | V_h <= d_h}`
 
-This role inversion can make both players optimize the wrong Hamiltonian. Even if the value function were numerically correct, the online controls would not match Eq. 26 of the paper.
+The paper explicitly expects the invariant sets to sit inside the original capture sets. In other words, `B_z` is more restrictive than `abs(z_rel) <= d_z`, and `B_h` is more restrictive than horizontal distance `<= d_h`. That subset property is necessary but not sufficient: it must come from the HJ max-distance game to give the paper's tracking guarantee.
 
-### Horizontal Role/Winning Convention Is Internally Inconsistent With The Paper
+The paper's experiments compute:
 
-The paper's horizontal value function uses:
+- `V_z,inf` over `z_rel in [-10,10]`, `v_Dz in [-4,4]` on a `240 x 100` grid.
+- Horizontal `V_h,T` over `x_rel,y_rel in [-3,3]`, `v_Dx,v_Dy in [-6,6]` on a `60 x 60 x 75 x 75` grid, using finite horizon `T=2.5 s`.
+- `Phi_h` on a 6D grid of size `85 x 45 x 85 x 45 x 8 x 7` for `(x_A, y_A, x_D, y_D, v_Dx, v_Dy)`, with `T=22 s`, taking about 3 hours in OptimizedDP.
 
-- `W_A,h = {Phi_h <= 0}`
-- `W_D,h = {Phi_h > 0}`
+## Current Code Path
 
-The code uses:
+### Offline Value-Function Pipeline
 
-- `in_W_D_h = phi_h <= 0`
-- Defender reaching control from `phi_h` only when `phi_h <= 0`
-- `get_winning_regions()` globally defines `W_D = values <= 0`
+The offline value-function code lives in `reach_avoid_game/src/reach_avoid_game/solvers`.
 
-This could be valid only if `phi_h` is intentionally redefined as a defender-capture value function. But then it is not the paper's `Phi_h`, and the code comments/tests are misleading. Right now the code combines paper labels with non-paper value semantics.
+Important current behavior:
 
-### Horizontal Target/Avoid Sets Are Swapped Relative To The Original RA Game
+- `vertical_solver.py` still calls `HJSolver` for `phi_z`, but `solve_vertical_max_distance()` no longer solves an HJ max-distance PDE. It constructs:
+  - `v_z_inf = abs(z_rel) + max(0, abs(v_Dz) - speed_margin) / k_z`
+- `horizontal_solver.py` still calls `HJSolver` for `phi_h`, but both horizontal max-distance artifacts are formulas:
+  - `V_h_T = sqrt(x_rel^2 + y_rel^2) + speed_excess / min(k_x,k_y)`
+  - `V_h_T_6d = distance + speed_excess / min(k_x,k_y) + obstacle_penalty`
+- `compute_invariant_set_Bz()` and `compute_invariant_set_Bh()` now refuse to expand thresholds. This is an improvement over the previous report.
+- `B_z` and `B_h` are now subset-checked against physical capture sets. This is also an improvement.
+- However, the source values for those sets are not the paper's HJ maximum-distance values, so the set labels and metadata are misleading.
 
-The code constructs:
+The current solver wrapper in `reach_avoid_game/src/reach_avoid_game/odp/solver.py` imports the real `odp.solver`. This is also different from the previous report. The current problem is not a hidden `hj_reachability` backend; it is that `odp` is not available in this environment and the most important max-distance artifacts are not solved with `HJSolver` at all.
 
-- target = capture set (`horizontal_solver.py:221-222`)
-- obstacle/avoid = defender walls/obstacles plus attacker walls/obstacles (`:224-233`)
+### Defender Controller
 
-The paper's horizontal RA game instead treats the attacker's goal and defender collision as the attacker's reach/loss structure and defender capture as the avoid/capture condition. The later reach-track modification uses `B_h`, but the same caution applies: the sign conventions must be explicit and consistent.
+The defender controller is in `reach_avoid_ws/src/reach_avoid_controller/reach_avoid_controller/defender_node.py`.
 
-### Maximum-Distance Solves Need Backend-Level Verification
+Important current behavior:
 
-`V_z_inf` and `V_h_T` are intended to solve:
+- Vertical Algorithm 1:
+  - Checks `B_z` validity.
+  - Uses `phi_z <= 0` as the defender vertical winning condition.
+  - Uses `phi_z` gradients for reaching if outside `B_z`.
+  - Uses `V_z_inf` gradients for near-boundary tracking.
+  - Uses PID when deep inside `B_z` or when the HJ command does not close the gap.
+- Horizontal Algorithm 2:
+  - Requires `V_h_T_6d`.
+  - Uses `phi_h > 0` as the paper horizontal defender-winning condition.
+  - Uses `V_h_T_6d <= d_h` as the `B_h`/tracking gate.
+  - Uses `phi_h` gradients for reaching outside `B_h`.
+  - Uses PID pursuit when outside the winning region or when an HJ command does not close the gap.
+- `compute_control()` returns zero command when the physical capture condition is met. Some "defender stopped moving" observations are therefore intentional terminal behavior.
+
+The sign conventions in the current defender controller are much better than the previous report described. The remaining issue is that the gradients are coming from coarse or surrogate values, and the simulation adapter later clamps/filters the commands.
+
+### Attacker Controller
+
+The attacker controller is in `reach_avoid_ws/src/attacker_controller/attacker_controller/attacker_node.py`.
+
+Important current behavior:
+
+- Default launch mode is `optimal`.
+- In `optimal` mode, if `phi_h`, `phi_z`, defender state, and defender velocity are available, the attacker uses:
+  - `phi_h` gradient with respect to attacker x/y for horizontal command.
+  - `phi_z` gradient with respect to attacker z for vertical command.
+- It only falls back to direct goal seeking when:
+  - value functions are unavailable,
+  - defender state/velocity is unavailable,
+  - horizontal `phi_h` gradient is near zero,
+  - or an exception occurs.
+
+That means the attacker is not "optimally going toward the goal" in the simple sense. It is trying to play the game implied by `phi_h`. If `phi_h` is coarse, surrogate-dependent, or not aligned with the target-reaching objective, the attacker may move away from the target even though direct goal seeking would move toward it.
+
+### Launch And PX4 Adapter
+
+The full simulation is launched from `reach_avoid_ws/src/reach_avoid_bringup/launch/full_game.launch.py`, which includes `simulation.launch.py`.
+
+Important current behavior in `simulation.launch.py`:
+
+- Default defender pose: `(5.0, 12.5, 3.0)`.
+- Default attacker pose: `(5.0, 20.0, 3.0)`.
+- Attacker target: `(41.5, 12.5, 10.0)`.
+- The attacker has scripted waypoints available, but default mode is `optimal`.
+- The PX4 adapter receives:
+  - `max_speed_horizontal = 1.5`
+  - `max_speed_vertical = 0.6`
+  - `max_accel_horizontal = 0.6`
+  - `max_accel_vertical = 0.6`
+  - `target_altitude = spawn[2]`
+
+The adapter in `reach_avoid_ws/src/reach_avoid_sim/reach_avoid_sim/px4_adapter_node.py` then:
+
+- clamps game commands to adapter speed caps,
+- smooths/rate-limits them,
+- applies geofence and obstacle projections,
+- applies altitude hold,
+- zeros horizontal motion while below target altitude by more than `0.75 m`.
+
+This means the ROS controller may compute a paper-scale command, but PX4 will often receive a much smaller or altered command. For the current run, that is not a minor detail; it changes the closed-loop behavior substantially.
+
+## Value Function Audit
+
+### Artifact Inventory
+
+Current checked-in value functions in `data/value_functions`:
+
+| Artifact | Shape | Min | Max | Notes |
+|---|---:|---:|---:|---|
+| `phi_h.npz` | `(9, 7, 5, 5, 9, 7)` | `-3.33016` | `4.05963` | `38219/99225` cells are `<= 0`, meaning attacker-winning under paper convention |
+| `V_h_T_6d.npz` | `(9, 7, 5, 5, 9, 7)` | `0` | `67.3143` | only `288/99225` cells satisfy `<= d_h=3` |
+| `V_h_T.npz` | `(21, 21, 11, 11)` | `0` | `16.3214` | marked `paper_valid=False`; diagnostic only |
+| `B_h.npz` | `(9, 7, 5, 5, 9, 7)` | `0` | `1` | `288` cells inside, subset-valid, source `V_h_T_6d` |
+| `V_z_inf.npz` | `(51, 31)` | `0` | `11.3333` | formula source, not HJ max-distance solve |
+| `B_z.npz` | `(51, 31)` | `0` | `1` | `103` cells inside, subset-valid, source `V_z_inf` |
+| `phi_z.npz` | `(24, 10, 24)` | `-1` | `99` | source target from `V_z_inf` |
+| `phi_A_reach.npz` | `(21, 13)` | `-2.5` | `8.3134` | 2D attacker reaching artifact |
+
+Subset checks now pass:
+
+- `B_z`: `103` cells inside; `0` outside `abs(z_rel) <= 1`.
+- `B_h`: `288` cells inside; `0` outside horizontal distance `<= 3`.
+
+This is better than the stale report, which described threshold-expanded masks outside the physical capture set. But the key issue remains: the values used to build the masks are not the paper's max-distance HJ values.
+
+### Formulas Versus Paper Values
+
+The paper's vertical invariant set requires:
 
 ```text
-sup attacker inf defender max_tau distance(...)
+V_z(x_z_rel, t) = sup_{u_A} inf_{u_D} max_{tau in [0,t]} |z_rel(tau)|
+B_z = {x_z_rel | V_z,inf(x_z_rel) <= d_z}
 ```
 
-The repo uses `TargetSetMode: maxVWithV0`, `control_mode="min"`, and `disturbance_mode="max"` for relative dynamics. That high-level choice is plausible. The problem is that the `hj_reachability` wrapper is not a proven OptimizedDP replacement here, and the outputs fail the most basic invariant-set sanity check: their minimum values exceed the capture thresholds.
-
-Before using these in ROS, the team should validate the backend on the 2D vertical problem against the paper's Fig. 4 behavior. Specifically, `V_z_inf(0,0)` and nearby states should allow a nonempty `V_z_inf <= 1` set with the paper parameters.
-
-## Controller Behavior Issues
-
-### The Controller Uses Full-Speed Bang-Bang On Zero Gradients
-
-Several control functions use `>= 0` to break ties:
-
-- `_optimal_reaching_vertical`: `return +U_D_z if direction >= 0 else -U_D_z`
-- `_optimal_tracking_vertical`: `return -U_D_z if direction >= 0 else +U_D_z`
-- horizontal reaching/tracking uses the same pattern per component.
-
-At the exact center of `B_z`, the gradient is approximately zero, so the vertical tracking controller commands `-4 m/s` instead of `0`. Sample result from the saved VFs:
-
-```text
-defender=(20,12,10), attacker=(20,12,10), velocity=0
-z_mode=tracking
-cmd_z=-4.0
-captured=True
-```
-
-This is a direct cause of drones diving/climbing when they should hold or use a smooth tracking controller.
-
-### The "Deep Inside B" Test Uses A Broken Value Baseline
-
-The code checks:
+The current code constructs:
 
 ```python
-near_boundary = V_z_inf(state) > (d_z_eff - margin_z)
+velocity_penalty = max(0, abs(v_Dz) - speed_margin) / k_z
+V_z_inf = abs(z_rel) + velocity_penalty
 ```
 
-But with the saved values, `V_z_inf(0,0) ~= 3.425`, `d_z_eff ~= 3.596`, and `margin_z = 0.3`. So the center point is considered near the boundary:
+The paper's horizontal invariant set requires an obstacle-aware max-distance value:
 
 ```text
-3.425 > 3.296
+V_h(x_h,t) = sup_A inf_D max_tau l_h(x_h(tau))
+l_h = max(relative_horizontal_distance, obstacle_penalty)
+B_h = {x_h | V_h <= d_h}
 ```
 
-This forces optimal tracking at the most benign state. Since the gradient is zero and tie-breaking is full-speed, the controller immediately commands aggressive motion.
-
-### Horizontal Control Falls Back To PID For Most Useful States
-
-At launch:
-
-```text
-defender=(5,12.5,3), attacker=(5,20,3)
-phi_h ~= 4.11
-h_mode=pid_pursuit
-```
-
-So the live simulation is mostly not using the horizontal HJ controller. It is using a simple proportional pursuit controller, then a post-hoc wall-avoidance layer. That can look like drones chasing, overshooting, and bouncing around instead of executing reach-track-avoid.
-
-### Attacker "Optimal" Mode Does Not Primarily Seek The Goal
-
-`attacker_node.py` optimal mode computes gradients of `phi_h` and `phi_z` and chooses controls to minimize those values (`attacker_node.py:270-327`). It only goal-seeks when gradients are near zero or VFs are unavailable.
-
-If `phi_h` is actually a defender-capture BRT, minimizing it may not correspond to "attacker reaches target while avoiding defender." If `phi_h` is intended as the paper's horizontal value, then the defender side is wrong. Either way, attacker and defender are not playing the same formally defined game.
-
-## Simulation / ROS Issues
-
-### Launch And Config Are Not Fully Unified
-
-The main mathematical config has target `[38,45] x [10,15]` and obstacle `[15,20] x [5,20]`. The launch file correctly overrides the attacker target to `(41.5,12.5,10)` (`simulation.launch.py:290-300`), but the attacker node defaults are unrelated `(7,4,2)` (`attacker_node.py:37-46`). This is not the main bug, but it makes standalone runs misleading.
-
-### PX4 Adapter Assumes Offboard/Arm Success
-
-`px4_adapter_node.py` sends offboard and arm commands, then assumes success after a fixed count. It does not verify `VehicleStatus`. This can cause simulation behavior that looks like controller failure when PX4 has not actually accepted the mode/arming state. This is secondary to the value-function issues but still worth fixing once the math is corrected.
-
-### Ground Truth Relay Uses PX4 Local Position Plus Spawn
-
-The relay converts PX4 local NED to ENU and adds the spawn offset (`ground_truth_relay_node.py:90-108`). This is correct if PX4 local position is relative to the spawn/home point. If the PX4 topic is already world-relative in the current SITL setup, this would double-count spawn. I did not find proof of double-counting in code alone, so this is a validation item rather than a confirmed bug.
-
-## Test Coverage Problems
-
-The tests currently encode several wrong assumptions:
-
-- `test_horizontal_dynamics.py` explicitly asserts that the defender maximizes and attacker minimizes in horizontal. That matches Eq. 21, but the rest of the repo then treats `phi_h <= 0` as defender-winning, contradicting the paper's horizontal winning-region statement.
-- `test_winning_conditions.py` globally defines defender-winning as `phi <= 0`, which is wrong for the paper's horizontal `Phi_h`.
-- `test_vertical_solver.py` allows comments like "Phi_z may be positive everywhere" and accepts coarse-grid behavior, which hides the invariant-set failure.
-- Tests assert `B_z` is nonempty after the effective-threshold hack, instead of asserting the mathematically important condition `min(V_z_inf) <= d_z`.
-- There is no test that `B_z` is a subset of `|z_rel| <= d_z`.
-- There is no test that `B_h` is a subset of horizontal distance `<= d_h`.
-- There is no test that equal-position/equal-velocity states produce near-zero defender command.
-- There is no backend parity test against OptimizedDP on a small known problem.
-
-Also, the current environment cannot run the HJ computation package because `hj_reachability`, `jax`, and `odp` are missing.
-
-## Root Cause Chain For Bad Drone Behavior
-
-The likely runtime chain is:
-
-1. Offline value functions are computed using a non-OptimizedDP `hj_reachability` wrapper with unverified sign conventions.
-2. `V_z_inf` and `V_h_T` fail to produce nonempty invariant sets at the paper capture thresholds.
-3. The code silently expands capture thresholds to make `B_z` and `B_h` nonempty.
-4. The online controller believes states outside real capture are inside invariant capture sets.
-5. In those sets, it often chooses tracking mode.
-6. Near zero gradient, tie-breaking produces full-speed commands instead of zero/smooth commands.
-7. In horizontal states, the controller often falls back to PID because `phi_h` is almost never classified as defender-winning.
-8. The final command is then clipped and modified by wall avoidance, further decoupling live behavior from the value functions.
-
-## Recommendations
-
-### 1. Decide And Enforce The Backend
-
-If the requirement is to use `optimized_dp`, install and import the real package:
-
-- Populate the `optimized_dp/` checkout or add it as a submodule.
-- Ensure `from odp.Grid import Grid` succeeds.
-- Ensure HJ solves call OptimizedDP's `HJSolver`, not `hj.solve`.
-- Remove or clearly separate the `hj_reachability` wrapper.
-
-If the team intentionally wants `hj_reachability`, update the project goal and re-derive every value-function convention for that backend. Do not call it OptimizedDP-compatible until parity tests pass.
-
-### 2. Fix Vertical Game Roles
-
-For the paper's vertical game:
-
-- Defender should minimize.
-- Attacker should maximize.
-- `VerticalGameDynamics` should use `control_mode="min"`, `disturbance_mode="max"`.
-- Online vertical reaching control should use the minimizing sign.
-- Attacker vertical optimal control should use the maximizing sign.
-
-Then recompute `phi_z`, `V_z_inf`, and `B_z`.
-
-### 3. Remove Effective Capture Threshold Hacks
-
-Do not use:
+The current code constructs:
 
 ```python
-d_eff = max(d, min(V) * 1.05)
+speed_excess = max(0, sqrt(v_Dx^2 + v_Dy^2) - speed_margin)
+V_h_T = distance + speed_excess / min(k_x, k_y)
+V_h_T_6d = distance + speed_excess / min(k_x, k_y) + obstacle_penalty
 ```
 
-Instead:
+These formulas are not necessarily wrong as engineering heuristics. They are much faster, safer than threshold expansion, and easy to reason about. But they should not be called paper-valid HJ value functions. They do not include adversarial trajectories, finite/infinite horizon max-over-time propagation, or the HJ Hamiltonian solve that gives the invariant guarantee.
 
-- If `min(V_z_inf) > d_z`, the invariant set is empty. Treat that as a failed computation/configuration, not as permission to enlarge capture.
-- For debugging, save an explicit diagnostic set like `B_z_effective_debug`, but never feed it into the controller as `B_z`.
-- Add tests:
-  - `assert V_z_inf.min() <= d_z`
-  - `assert np.all(B_z_mask <= (abs(z_rel) <= d_z))`
-  - `assert V_h_T.min() <= d_h` for the intended finite-horizon set
-  - `assert np.all(B_h_mask <= (horizontal_dist <= d_h))`
+### Grid Resolution
 
-### 4. Rebuild Horizontal `Phi_h` With A Clear Convention
+The paper-scale horizontal solve uses an `85 x 45 x 85 x 45 x 8 x 7` grid. The current checked-in `phi_h` uses a much smaller `9 x 7 x 5 x 5 x 9 x 7` grid.
+
+That grid is extremely coarse over a `45 m x 25 m` arena:
+
+- x spacing is about `5.625 m`.
+- y spacing is about `4.167 m`.
+- defender velocity spacing is about `3 m/s`.
+
+At this resolution, gradient-based bang-bang controls are very sensitive to interpolation artifacts. A small local gradient can flip a full-speed direction. This is part of why the defender can get an x command when the launch x error is exactly zero, and why the attacker can get a y command away from the target.
+
+### Metadata Problem
+
+The loader uses metadata such as `paper_valid` and `subset_valid` to decide whether artifacts are acceptable.
+
+Current metadata declares:
+
+- `V_z_inf`: `paper_valid=True`
+- `V_h_T_6d`: `paper_valid=True`
+- `B_z`: `paper_valid=True`, `subset_valid=True`
+- `B_h`: `paper_valid=True`, `subset_valid=True`
+- `phi_h`: `paper_valid=True`, convention `paper_horizontal_phi_h`
+
+This metadata is too strong. `B_z` and `B_h` are subset-valid, but their source functions are formula-based approximations. The report should distinguish:
+
+- "safe diagnostic/surrogate value"
+- "subset-valid physical capture mask"
+- "paper-valid HJ max-distance value"
+- "paper-valid HJ reach-avoid value"
+
+Right now the controller cannot tell these apart.
+
+## Behavior Diagnosis
+
+### Attacker: Why It Does Not Optimally Go Toward The Goal
+
+The attacker target is `(41.5, 12.5, 10.0)`. At the default launch state:
+
+- defender: `(5.0, 12.5, 3.0)`
+- attacker: `(5.0, 20.0, 3.0)`
+- direct horizontal target vector from attacker is `(36.5, -7.5)`, so a direct goal-seeking attacker should move positive x and negative y.
+
+The current `optimal` attacker does not use direct goal seeking as the primary objective. It uses `phi_h` gradient:
+
+```python
+h_grad = self._vf_loader.get_gradient("phi_h", h_state)
+grad_xa = h_grad[4]
+grad_ya = h_grad[5]
+cmd.linear.x = -U_A_h if grad_xa >= 0 else U_A_h
+cmd.linear.y = -U_A_h if grad_ya >= 0 else U_A_h
+```
+
+At the launch state, the measured `phi_h` gradient components were approximately:
+
+```text
+dPhi_h/dx_A = -0.0957
+dPhi_h/dy_A = -0.0460
+```
+
+Because both are negative, the attacker's bang-bang rule commands:
+
+```text
+u_A,h ~= (3, 3)
+```
+
+That is positive x and positive y. Positive x helps reach the target, but positive y moves away from `y=12.5`. So the attacker can visibly fail to fly optimally toward the goal even while the code calls the mode "optimal."
+
+This is not a simple sign typo in the fallback. The fallback is not active when `phi_h` gradients are nonzero. The problem is that the main online objective is the game value `phi_h`, not the attacker reaching value `phi_A_reach`, and the checked-in `phi_h` is a coarse value influenced by surrogate `B_h`.
+
+### Defender: Why It Does Not Optimally Go Toward The Attacker
+
+At the default launch state, the defender and attacker have the same x coordinate:
+
+```text
+defender: (5.0, 12.5, 3.0)
+attacker: (5.0, 20.0, 3.0)
+horizontal relative position: x_rel = 0, y_rel = -7.5
+```
+
+A simple pursuit controller should command mostly positive y and almost zero x.
+
+The defender's HJ reaching gradient at that state produced velocity-gradient components approximately:
+
+```text
+dPhi_h/dv_Dx = 0.0568
+dPhi_h/dv_Dy = 0.0186
+```
+
+The defender reaching rule maximizes `phi_h`, so it chooses full positive x and y before speed-magnitude clamping. After clamping to `U_D_h=6`, the command becomes approximately:
+
+```text
+u_D,h ~= (4.24, 4.24)
+```
+
+The positive y component closes the gap; the positive x component is arbitrary for the launch geometry and can look wrong in simulation. This is exactly the kind of artifact expected from a very coarse 6D value function and surrogate invariant target.
+
+The controller does have guardrails:
+
+- If `phi_h <= 0`, it treats the horizontal state as attacker-winning and uses PID pursuit.
+- If the HJ command does not close the relative gap, it falls back to PID pursuit.
+- If physical capture is already true, it returns zero command.
+
+Those guardrails reduce some bad behavior, but they do not make the HJ gradient itself reliable.
+
+### Algorithm 2 Gate Can Be Misleading
+
+Algorithm 2 currently uses:
+
+```text
+in_B_h = V_h_T_6d(horizontal_state) <= d_h
+```
+
+Because `V_h_T_6d` is formula-based and very coarse, interpolation can produce surprising values near same-position or near-capture states. One probe at same position returned:
+
+```text
+V_h_T_6d ~= 6.3333
+B_h interpolation ~= 0.3086
+```
+
+The physical capture test still correctly declares capture and returns zero command. But for near-capture states, the `B_h`/tracking gate is not a trustworthy paper invariant-set check.
+
+### Simulation Layer Suppresses Both Players
+
+The controller computes game commands using paper-scale values:
+
+- defender horizontal limit: `6 m/s`
+- defender vertical limit: `4 m/s`
+- attacker horizontal limit from value-function params: `3 m/s`
+- attacker vertical limit from value-function params: `2 m/s`
+
+But `simulation.launch.py` configures the PX4 adapter with:
+
+```text
+max_speed_horizontal = 1.5
+max_speed_vertical = 0.6
+max_accel_horizontal = 0.6
+max_accel_vertical = 0.6
+```
+
+The adapter also applies altitude hold:
+
+```text
+if current z is below target altitude by more than 0.75 m:
+    horizontal velocity is set to zero
+```
+
+This means the game controller can say "move horizontally now," while the PX4 adapter says "climb first, no horizontal motion yet." This creates a mismatch between the model used for reachability and the actual closed-loop simulation.
+
+### Latest Gazebo Run Evidence
+
+The latest trajectory summary in `data/plots/gazebo_runs/full_game_trajectory_latest_summary.json` says:
+
+```json
+{
+  "attacker_obstacle_samples": 0,
+  "attacker_samples": 1476,
+  "attacker_target_samples": 0,
+  "capture_samples": 0,
+  "defender_obstacle_samples": 0,
+  "defender_samples": 1476,
+  "min_horizontal_distance": 6.351266782095096,
+  "min_vertical_distance": 0.0,
+  "outside_room_samples": 0
+}
+```
+
+The run did not capture the attacker and the attacker did not reach the target.
+
+Sample paired trajectory states show the drones spending a long time near the floor/climbing before useful horizontal game motion:
+
+| Time since recording start | Defender | Attacker | h distance | z distance |
+|---:|---|---|---:|---:|
+| `0.0 s` | `(36.49, 12.46, 0.14)` | `(10.01, 12.54, 0.07)` | `26.48` | `0.07` |
+| `15.16 s` | `(36.63, 12.49, 0.63)` | `(10.06, 12.53, 0.14)` | `26.57` | `0.50` |
+| `30.16 s` | `(36.53, 12.48, 8.81)` | `(10.02, 12.50, 8.32)` | `26.51` | `0.50` |
+| `44.99 s` | `(22.80, 21.25, 9.73)` | `(14.10, 20.98, 9.73)` | `8.70` | `0.00` |
+| `47.44 s` | `(20.31, 21.12, 9.74)` | `(13.96, 21.09, 9.72)` | `6.35` | `0.02` |
+| `59.92 s` | `(20.48, 21.01, 9.73)` | `(3.40, 20.70, 9.76)` | `17.09` | `0.03` |
+
+The vertical component eventually aligns, but the horizontal game never achieves the `d_h=3` capture threshold.
+
+## Tests And Validation Gaps
+
+### Selected Test Result
+
+Command run:
+
+```bash
+PYTHONPATH=reach_avoid_game/src:reach_avoid_ws/src/reach_avoid_controller \
+python -m pytest -q \
+  reach_avoid_ws/src/reach_avoid_controller/test \
+  reach_avoid_game/tests/test_value_function_io.py \
+  reach_avoid_game/tests/test_winning_conditions.py
+```
+
+Result:
+
+```text
+66 passed, 1 failed
+```
+
+The failing test was:
+
+```text
+TestWallAvoidance.test_wall_avoidance_allows_capture_near_wall
+```
+
+That test expects the defender to keep moving toward an attacker near the wall, but the sample state is already physically captured under `d_h=3`, `d_z=1`. Current `compute_control()` intentionally returns zero command for captured states. This test is stale or ambiguous; it is not primary evidence for the flight behavior problem.
+
+### Solver Tests Are Skipped
+
+Several solver tests include:
+
+```python
+pytest.importorskip("odp")
+```
+
+In the current environment:
+
+```text
+odp: missing
+jax: missing
+heterocl: missing
+hj_reachability: missing
+```
+
+So the tests that would most directly exercise true HJ solver behavior are skipped. This is a major validation gap.
+
+### Missing Acceptance Tests
+
+The repo needs tests that explicitly distinguish paper-valid HJ artifacts from surrogate artifacts. Recommended checks:
+
+- Assert `V_z_inf` was generated by an HJ max-distance solve, not by the closed-form conservative formula.
+- Assert `V_h_T` or `V_h_T_6d` records the actual HJ max-distance formulation and horizon.
+- Assert `B_z` and `B_h` are not only physical subsets but are derived from HJ max-distance values.
+- Assert launch-state attacker command has positive x and negative y when the intended validation mode is "goal-seeking attacker."
+- Assert launch-state defender command has near-zero x for symmetric x geometry unless an obstacle/wall genuinely requires x motion.
+- Assert PX4 adapter limits match the modeled speed limits in paper-validation runs, or explicitly tag the run as a slowed hardware-safe variant.
+- Assert trajectory summaries include capture within the expected time for the chosen scenario.
+
+## What Is Fixed Since The Previous Report
+
+The previous report from 2026-04-18 is stale. The following issues have improved:
+
+- The current `VerticalGameDynamics` uses defender `uMode="min"` and attacker `dMode="max"`, matching the paper's vertical role convention.
+- Horizontal winning convention is now closer to the paper: defender-winning is treated as `phi_h > 0`.
+- Threshold expansion for `B_z` and `B_h` has been removed. The code now raises if the requested threshold is empty.
+- Current `B_z` and `B_h` masks are physical subsets of the corresponding capture sets.
+- The controller now rejects threshold-expanded invariant masks via metadata.
+- The controller uses only 6D `V_h_T_6d` for horizontal tracking, not the old 4D relative `V_h_T`.
+- The local solver wrapper now imports real `odp` rather than the older `hj_reachability` compatibility layer.
+
+These fixes are good, but they do not complete the replication because the current max-distance artifacts are not HJ solves.
+
+## Recommended Fix Order
+
+### 1. Separate Surrogate Artifacts From Paper Artifacts
+
+Do this first because it prevents the controller and tests from trusting the wrong data.
+
+- Rename or re-label formula artifacts:
+  - `V_z_inf_surrogate`
+  - `V_h_T_surrogate`
+  - `V_h_T_6d_surrogate`
+- Set `paper_valid=False` for formula-based values.
+- Add metadata fields such as:
+  - `construction: formula_surrogate`
+  - `hj_solved: false`
+  - `guarantee: physical_subset_only`
+- Require HJ-generated values for paper-validation launch modes.
+
+### 2. Restore Real HJ Max-Distance Computation
+
+For paper replication, implement or restore:
+
+- Vertical:
+  - solve `V_z = sup_A inf_D max_tau |z_rel|`
+  - compute `B_z = {V_z,inf <= d_z}`
+  - verify `B_z` is nonempty and subset of `C_z`
+- Horizontal:
+  - solve obstacle-aware `V_h` over a state that can encode defender obstacles
+  - use the paper horizon behavior: finite `T=2.5 s` if infinite horizon does not converge
+  - compute `B_h = {V_h <= d_h}`
+
+This requires an environment with OptimizedDP/`odp` and HeteroCL available. No real HJ recomputation was performed for this report because those packages are unavailable here.
+
+### 3. Decide The Attacker Validation Mode
+
+The paper's adversarial attacker and a "fly optimally to the goal" attacker are not always the same thing in this code.
+
+For debugging the user-observed issue, add an explicit launch mode:
+
+- `goal_optimal`: use `phi_A_reach` or direct shortest-time target reaching with obstacle avoidance.
+- `game_optimal`: use `phi_h`/`phi_z` as the adversarial game policy.
+- `scripted`: follow waypoints for repeatable system tests.
+
+Then validate each mode separately. Do not use the label `optimal` without saying optimal for which objective.
+
+### 4. Align Simulation Limits With The Model For Paper Runs
+
+For a paper-replication run, PX4 adapter limits must match the model or the model must be recomputed for the lower limits.
 
 Choose one:
 
-Option A: replicate paper `Phi_h`.
+- Paper-scale simulation:
+  - PX4 adapter horizontal cap: `6.0` for defender, `3.0` for attacker
+  - PX4 adapter vertical cap: `4.0` for defender, `2.0` for attacker
+  - acceleration/rate limits high enough to approximate `k_x=0.7`, `k_y=0.7`, `k_z=1.5`
+- Hardware-safe slowed simulation:
+  - lower PX4 caps
+  - recompute all value functions using those lower caps
+  - label results as hardware-safe variant, not paper replication
 
-- Use the paper's target/avoid sets and winning signs.
-- In controller/status, use `W_D,h = phi_h > 0`.
-- Use Eq. 21 signs for defender/attacker.
+Also avoid zeroing horizontal motion during the game unless the reachability model includes that takeoff/altitude phase.
 
-Option B: use a defender-capture value function.
+### 5. Increase Grid Resolution For Meaningful Gradients
 
-- Rename it to avoid confusion, e.g. `phi_h_defender_capture`.
-- Document that `<=0` means defender can capture.
-- Do not compare it directly to the paper's `Phi_h` or theorem without translating conventions.
+The current `9 x 7 x 5 x 5 x 9 x 7` 6D grid is useful for smoke tests, not for stable bang-bang control in a `45 m x 25 m` arena.
 
-Right now the code is halfway between these options.
+Minimum recommendation:
 
-### 5. Use Obstacle-Aware Horizontal Tracking Or Admit No Guarantee
+- Use the paper or near-paper grid for final `Phi_h`.
+- Keep `dev` grids only for CI and structural tests.
+- Add a runtime warning when loading `dev` artifacts into `full_game.launch.py`.
 
-The controller loads `V_h_T` and `B_h`, both 4D relative objects. They cannot encode defender obstacle avoidance. The optional `V_h_T_6d.npz` is not used.
+### 6. Add End-To-End Acceptance Criteria
 
-To match Algorithm 2:
+A paper-replication run should not be considered successful unless:
 
-- Compute obstacle-aware `V_h` in the state used by tracking.
-- Derive `B_h` from that value function.
-- Load that same value function in the controller for tracking gradients.
+- The value-function metadata proves the artifacts came from HJ solves.
+- The controller starts in the expected winning regions for the scenario.
+- The attacker mode is explicitly chosen and matches the expected objective.
+- The PX4 adapter limits match the value-function parameters.
+- The trajectory summary shows capture:
+  - `capture_samples > 0`
+  - `min_horizontal_distance <= d_h`
+  - `min_vertical_distance <= d_z`
+  - attacker target samples are zero before capture for defender-win scenarios
 
-Otherwise, use only vertical reach-track plus horizontal capture pursuit, as the paper suggests as a possible mitigation.
+## Conclusion
 
-### 6. Add Zero-Gradient Deadbands
+The repo has moved closer to the paper in sign conventions and physical subset checks, but it still does not replicate the paper's core mathematical pipeline. The biggest current mismatch is that the invariant-set values are formula-based surrogates marked as paper-valid. That makes the defender's reach-track logic depend on data that cannot provide the paper's HJ tracking guarantee.
 
-Every bang-bang extraction should have a deadband:
+The attacker behavior is also explained by the code: "optimal" mode uses `phi_h` gradients, not direct target-reaching gradients, so it can command motion away from the goal. The defender behavior is explained by the same family of issues: coarse/surrogate `phi_h` gradients can produce arbitrary full-speed components, and PX4 then clamps or overrides those commands.
 
-```python
-if abs(direction) < eps:
-    return 0.0  # or PID/smooth tracking command
-```
-
-For horizontal, apply this per axis or normalize the gradient direction before choosing a command. Full-speed commands on zero gradient are a major behavior bug.
-
-### 7. Increase Resolution Only After Semantics Are Correct
-
-Do not spend hours on high-resolution solves until the 2D vertical invariant problem passes. The fastest validation ladder should be:
-
-1. 2D `V_z_inf` on paper parameters: verify `B_z = {V <= 1}` is nonempty and subset of `C_z`.
-2. 3D `Phi_z` with `B_z`: verify reaching trajectories enter `B_z`.
-3. 4D or 6D horizontal tracking: verify `B_h` subset and no obstacle violation.
-4. 6D horizontal RA: verify winning sign convention on obvious states.
-5. ROS/PX4 simulation.
-
-### 8. Fix Metadata Portability
-
-The saved `.npz` files were written with NumPy 2.x object metadata. In the current NumPy 1.x environment, loading `params` raises `ModuleNotFoundError: numpy._core`. The ROS loader catches this only in fallback mode and silently uses defaults.
-
-Save params as JSON/YAML strings instead of pickled Python objects. This removes version-dependent behavior and makes the simulation reproducible.
-
-## Immediate Triage Checklist
-
-1. Stop using the current `B_z.npz` and `B_h.npz` as invariant capture sets. They are threshold-expanded.
-2. Fix vertical min/max roles and recompute `V_z_inf`.
-3. Verify `V_z_inf.min() <= 1.0` before computing `B_z`.
-4. Add zero-gradient deadbands to all optimal control extraction.
-5. Decide whether `phi_h` is the paper's `Phi_h` or a defender-capture BRT. Update signs and names accordingly.
-6. Do not run full Gazebo/PX4 as a correctness test until the 2D and 3D value-function sanity checks pass.
-
-## Verification Performed
-
-- Read repo structure and key files under `reach_avoid_game`, `reach_avoid_ws`, `config`, `tests`, and `data/value_functions`.
-- Extracted relevant text from `Reachability.pdf` using `pdfminer`.
-- Inspected solver backend imports and dependencies.
-- Loaded saved value function arrays and computed shapes, min/max values, negative-cell counts, and invariant-mask subset checks.
-- Sampled the live `DefenderControlLogic` against saved value functions.
-
-Could not run the offline tracker directly because `tests/sim_drone_tracker.py` hardcodes `/workspace/config/game_params.yaml`, while this workspace is `/workspaces/UAV_Reachability_Analysis`. Could not recompute value functions in the current environment because `hj_reachability`, `jax`, and `odp` are not installed.
+To make the drones behave like the paper, the next work should be: separate surrogate artifacts from HJ artifacts, recompute real HJ max-distance and reach-avoid values in an `odp` environment, make attacker objective modes explicit, and run paper-validation simulations with adapter limits that match the modeled game.

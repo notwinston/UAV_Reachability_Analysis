@@ -61,10 +61,29 @@ def _parse_pose(context, launch_name):
     return parts
 
 
-def _ground_spawn_pose(pose):
-    grounded = list(pose)
-    grounded[2] = 0.1
-    return ','.join(str(v) for v in grounded)
+def _format_pose(pose):
+    return ','.join(str(v) for v in pose)
+
+
+def _prepend_env_path(env, name, path):
+    if not os.path.exists(path):
+        return
+    existing = env.get(name, '')
+    parts = [p for p in existing.split(':') if p]
+    if path not in parts:
+        env[name] = ':'.join([path] + parts)
+
+
+def _with_px4_ros_env(extra=None):
+    env = os.environ.copy()
+    for pkg in ('px4_ros_com', 'px4_msgs'):
+        prefix = f'/opt/px4_ros_ws/install/{pkg}'
+        _prepend_env_path(env, 'AMENT_PREFIX_PATH', prefix)
+        _prepend_env_path(env, 'PYTHONPATH', os.path.join(prefix, 'lib', 'python3.10', 'site-packages'))
+        _prepend_env_path(env, 'LD_LIBRARY_PATH', os.path.join(prefix, 'lib'))
+    if extra:
+        env.update(extra)
+    return env
 
 
 def get_px4_path():
@@ -228,12 +247,12 @@ def generate_launch_description():
         attacker_pose = _parse_pose(context, 'attacker_pose')
         defender_env = {
             **env,
-            'PX4_GZ_MODEL_POSE': _ground_spawn_pose(defender_pose),
+            'PX4_GZ_MODEL_POSE': _format_pose(defender_pose),
             'PX4_UXRCE_DDS_NS': 'defender',
         }
         attacker_env = {
             **env,
-            'PX4_GZ_MODEL_POSE': _ground_spawn_pose(attacker_pose),
+            'PX4_GZ_MODEL_POSE': _format_pose(attacker_pose),
             'PX4_UXRCE_DDS_NS': 'attacker',
         }
         return [
@@ -259,6 +278,11 @@ def generate_launch_description():
     px4_processes = OpaqueFunction(function=add_px4_processes)
 
     def _adapter_params(vehicle_id, topic, prefix, spawn):
+        is_defender = prefix == 'defender'
+        max_speed_h = 6.0 if is_defender else 3.0
+        max_speed_z = 4.0 if is_defender else 2.0
+        max_accel_h = 12.0 if is_defender else 6.0
+        max_accel_z = 8.0 if is_defender else 4.0
         return {
             'vehicle_id': vehicle_id,
             'cmd_vel_topic': topic,
@@ -266,7 +290,7 @@ def generate_launch_description():
             'fmu_topic_prefix': prefix,
             'spawn_x': spawn[0],
             'spawn_y': spawn[1],
-            'spawn_z': 0.1,
+            'spawn_z': spawn[2],
             'target_altitude': spawn[2],
             'room_x_min': 0.0,
             'room_x_max': 45.0,
@@ -281,12 +305,13 @@ def generate_launch_description():
             'safety_margin': 4.0,
             'obstacle_margin': 4.0,
             'safety_lookahead': 2.0,
-            'command_filter_alpha': 0.35,
-            'max_accel_horizontal': 0.6,
-            'max_accel_vertical': 0.6,
-            'max_speed_horizontal': 1.5,
-            'max_speed_vertical': 0.6,
+            'command_filter_alpha': 0.75,
+            'max_accel_horizontal': max_accel_h,
+            'max_accel_vertical': max_accel_z,
+            'max_speed_horizontal': max_speed_h,
+            'max_speed_vertical': max_speed_z,
             'altitude_hold_gain': 0.8,
+            'altitude_hold_enabled': False,
         }
 
     def add_px4_adapter_nodes(context):
@@ -298,6 +323,7 @@ def generate_launch_description():
                 executable='px4_adapter',
                 name='px4_adapter_defender',
                 parameters=[_adapter_params(1, '/defender/cmd_vel', 'defender', defender_spawn)],
+                additional_env=_with_px4_ros_env(),
                 output='screen',
             ),
             Node(
@@ -305,6 +331,7 @@ def generate_launch_description():
                 executable='px4_adapter',
                 name='px4_adapter_attacker',
                 parameters=[_adapter_params(2, '/attacker/cmd_vel', 'attacker', attacker_spawn)],
+                additional_env=_with_px4_ros_env(),
                 output='screen',
             ),
         ]
@@ -323,11 +350,12 @@ def generate_launch_description():
                 'publish_rate': 50.0,
                 'defender_spawn_x': defender_spawn[0],
                 'defender_spawn_y': defender_spawn[1],
-                'defender_spawn_z': 0.1,
+                'defender_spawn_z': defender_spawn[2],
                 'attacker_spawn_x': attacker_spawn[0],
                 'attacker_spawn_y': attacker_spawn[1],
-                'attacker_spawn_z': 0.1,
+                'attacker_spawn_z': attacker_spawn[2],
             }],
+            additional_env=_with_px4_ros_env(),
             output='screen',
         )]
 
@@ -376,8 +404,8 @@ def generate_launch_description():
             'obstacle_margin': 3.0,
             'safety_lookahead': 1.0,
             'command_filter_alpha': 0.35,
-            'max_accel_horizontal': 1.0,
-            'max_accel_vertical': 1.0,
+            'max_accel_horizontal': 6.0,
+            'max_accel_vertical': 4.0,
         }],
         output='screen',
     )

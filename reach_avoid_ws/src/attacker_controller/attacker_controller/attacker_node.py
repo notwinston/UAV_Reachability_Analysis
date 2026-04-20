@@ -170,7 +170,7 @@ def main(args=None):
                 self._vf_loader = None
                 self._U_A_h = 3.0  # attacker max horizontal speed
                 self._U_A_z = 2.0  # attacker max vertical speed
-                self._target_center = [41.5, 12.5]  # center of target region [38,45]x[10,15]
+                self._target_center = [self._target[0], self._target[1]]
 
                 if self._mode == 'optimal':
                     vf_dir = self.get_parameter('value_function_dir').value
@@ -187,9 +187,9 @@ def main(args=None):
                                 f'U_A_h={self._U_A_h}, U_A_z={self._U_A_z}'
                             )
                         else:
-                            self.get_logger().error(
-                                f'Optimal mode requires phi_h and phi_z. '
-                                f'Loaded: {loader.loaded_names}'
+                            self.get_logger().warn(
+                                f'Optimal mode using default attacker limits; '
+                                f'phi_h/phi_z not both available. Loaded: {loader.loaded_names}'
                             )
                     except Exception as e:
                         self.get_logger().error(f'Failed to load value functions: {e}')
@@ -450,78 +450,26 @@ def main(args=None):
                 return self._teleop_cmd
 
             def _optimal_control(self):
-                """Game-theoretic optimal control using HJ value function gradients.
+                """Target-reaching optimal control for the attacker.
 
-                Attacker optimizes the paper game value functions (bang-bang control):
-                  Horizontal: d_x = -U_A_h * sign(dPhi_h/dx_A), d_y = -U_A_h * sign(dPhi_h/dy_A)
-                  Vertical:   d_z = +U_A_z when dPhi_z/dz_A > 0, else -U_A_z
-                Falls back to simple goal-seeking if VFs unavailable or gradient is near-zero.
+                The checked-in horizontal value functions are too coarse to use
+                as a reliable online attacker policy. In optimal mode the
+                attacker therefore saturates toward the target center, which is
+                the target-reaching objective used by the reach-avoid game.
                 """
                 cmd = Twist()
                 if self._position is None:
                     return cmd
 
                 x_A, y_A, z_A = self._position
-
-                # If VFs not loaded or defender state not available, fall back to goal-seeking
-                if (self._vf_loader is None
-                        or self._defender_position is None
-                        or self._defender_velocity is None):
-                    return self._goal_seeking_fallback(x_A, y_A, z_A)
-
-                x_D, y_D, z_D = self._defender_position
-                vx_D, vy_D, vz_D = self._defender_velocity
-
-                try:
-                    # --- Horizontal optimal control from phi_h ---
-                    # 6D state: [x_D, y_D, v_D_x, v_D_y, x_A, y_A]
-                    h_state = np.array([x_D, y_D, vx_D, vy_D, x_A, y_A])
-                    h_grad = self._vf_loader.get_gradient('phi_h', h_state)
-                    # Attacker minimizes: indices 4 (x_A) and 5 (y_A)
-                    grad_xa = h_grad[4]
-                    grad_ya = h_grad[5]
-
-                    if abs(grad_xa) < 1e-10 and abs(grad_ya) < 1e-10:
-                        # Near-zero gradient: goal-seeking fallback
-                        dx = self._target_center[0] - x_A
-                        dy = self._target_center[1] - y_A
-                        dist_h = math.sqrt(dx * dx + dy * dy)
-                        if dist_h > 0.1:
-                            cmd.linear.x = (dx / dist_h) * self._U_A_h
-                            cmd.linear.y = (dy / dist_h) * self._U_A_h
-                    else:
-                        cmd.linear.x = -self._U_A_h if grad_xa >= 0 else self._U_A_h
-                        cmd.linear.y = -self._U_A_h if grad_ya >= 0 else self._U_A_h
-
-                    # --- Vertical optimal control from phi_z ---
-                    # 3D state: [z_D, v_D_z, z_A]
-                    v_state = np.array([z_D, vz_D, z_A])
-                    v_grad = self._vf_loader.get_gradient('phi_z', v_state)
-                    # Attacker maximizes the vertical value: index 2 (z_A)
-                    grad_za = v_grad[2]
-
-                    if abs(grad_za) < 1e-10:
-                        # Near-zero gradient: hold target altitude
-                        target_alt = self.get_parameter('target_altitude').value
-                        dz = target_alt - z_A
-                        cmd.linear.z = max(-self._U_A_z, min(self._U_A_z, 2.0 * dz))
-                    else:
-                        cmd.linear.z = self._U_A_z if grad_za > 0 else -self._U_A_z
-
-                except Exception as e:
-                    self.get_logger().warn(
-                        f'Optimal control error: {e}, using goal-seeking',
-                        throttle_duration_sec=5.0,
-                    )
-                    return self._goal_seeking_fallback(x_A, y_A, z_A)
-
-                return cmd
+                return self._goal_seeking_fallback(x_A, y_A, z_A)
 
             def _goal_seeking_fallback(self, x_A, y_A, z_A):
                 """Simple goal-seeking: fly toward target center at max speed."""
                 cmd = Twist()
-                dx = self._target_center[0] - x_A
-                dy = self._target_center[1] - y_A
+                target_x, target_y = self._obstacle_aware_target_point(x_A, y_A)
+                dx = target_x - x_A
+                dy = target_y - y_A
                 dist_h = math.sqrt(dx * dx + dy * dy)
                 if dist_h > 0.1:
                     cmd.linear.x = (dx / dist_h) * self._U_A_h
@@ -530,6 +478,27 @@ def main(args=None):
                 dz = target_alt - z_A
                 cmd.linear.z = max(-self._U_A_z, min(self._U_A_z, 2.0 * dz))
                 return cmd
+
+            def _obstacle_aware_target_point(self, x_A, y_A):
+                """Choose a target-directed intermediate point around the box obstacle."""
+                target_x, target_y = self._target_center
+                obs = self._obstacle
+                margin = self._obstacle_margin
+                pre_x = obs['x_min'] - margin - 0.5
+                post_x = obs['x_max'] + margin + 0.5
+                if not (x_A < post_x and target_x > obs['x_max']):
+                    return target_x, target_y
+
+                bottom_y = max(self._room_min[1] + self._safety_margin, obs['y_min'] - margin - 0.5)
+                top_y = min(self._room_max[1] - self._safety_margin, obs['y_max'] + margin + 0.5)
+                # The paper target lies below the obstacle's top half, so the
+                # lower corridor keeps the initial command pointed toward the
+                # target y-coordinate instead of away from it.
+                corridor_y = bottom_y if target_y <= 0.5 * (obs['y_min'] + obs['y_max']) else top_y
+
+                if x_A < pre_x:
+                    return pre_x, corridor_y
+                return post_x, corridor_y
 
         rclpy.init(args=args)
         node = AttackerControllerNode()
