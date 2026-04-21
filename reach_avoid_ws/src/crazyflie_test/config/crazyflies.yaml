@@ -3,9 +3,9 @@ fileversion: 3
 
 robots:
   cf231:
-    enabled: true
+    enabled: false
     uri: radio://0/80/2M/E7E7E7E7E7
-    initial_position: [0.0, 0.0, 0.0]
+    initial_position: [-0.215, 2.239, 0.018]
     type: cf21  # see robot_types
     # firmware_params:
     #   kalman:
@@ -19,9 +19,9 @@ robots:
     # reference_frame: "odom_cf231" # use a custom reference frame if no global coordinate system is available
 
   cf5:
-    enabled: false
-    uri: radio://0/80/2M/E7E7E7E705
-    initial_position: [0.0, -0.5, 0.0]
+    enabled: true
+    uri: radio://0/100/2M/E7E7E7E705
+    initial_position: [-0.195, 1.973, 0.029]
     type: cf21  # see robot_types
     # firmware_params:
     #   kalman:

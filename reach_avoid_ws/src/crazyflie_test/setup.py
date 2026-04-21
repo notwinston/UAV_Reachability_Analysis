@@ -30,7 +30,9 @@ setup(
     entry_points={
         'console_scripts': [
             'hello_world = crazyflie_test.hello_world:main',
-            'customControl = crazyflie_test.customControl:main'
+            'customControl = crazyflie_test.customControl:main',
+            'proximity_stop = crazyflie_test.proximity_stop:main',
+            'print_position = crazyflie_test.print_position:main'
         ],
     },
 )
