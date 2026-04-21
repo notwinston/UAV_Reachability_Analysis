@@ -19,15 +19,48 @@ def _load_numerical_sim_module():
     return mod
 
 
-def test_attacker_target_policy_points_toward_paper_target():
+def test_attacker_target_policy_uses_hj_reaching_direction_from_upper_half():
     sim = _load_numerical_sim_module()
     config = GameConfig.from_yaml(Path(__file__).resolve().parents[2] / "config" / "game_params.yaml")
+    phi_a_reach = sim.load_value_function(
+        Path(__file__).resolve().parents[2] / "data" / "value_functions" / "phi_A_reach.npz"
+    )
 
-    d_x, d_y = sim._extract_target_reaching_disturbance(config, x_a=5.0, y_a=20.0, u_a_h=3.0)
+    d_x, d_y = sim._extract_target_reaching_disturbance(
+        config, phi_a_reach, x_a=5.0, y_a=20.0, u_a_h=3.0,
+    )
+
+    assert d_x > 0.0
+    assert d_y > 0.0
+    assert math.hypot(d_x, d_y) == pytest.approx(3.0)
+
+
+def test_attacker_target_policy_uses_hj_descent_near_obstacle():
+    sim = _load_numerical_sim_module()
+    config = GameConfig.from_yaml(Path(__file__).resolve().parents[2] / "config" / "game_params.yaml")
+    phi_a_reach = sim.load_value_function(
+        Path(__file__).resolve().parents[2] / "data" / "value_functions" / "phi_A_reach.npz"
+    )
+
+    d_x, d_y = sim._extract_target_reaching_disturbance(
+        config, phi_a_reach, x_a=14.7, y_a=3.5, u_a_h=3.0,
+    )
 
     assert d_x > 0.0
     assert d_y < 0.0
     assert math.hypot(d_x, d_y) == pytest.approx(3.0)
+
+
+def test_attacker_hard_barrier_does_not_override_hj_motion_below_obstacle():
+    sim = _load_numerical_sim_module()
+    config = GameConfig.from_yaml(Path(__file__).resolve().parents[2] / "config" / "game_params.yaml")
+
+    d_x, d_y = sim._apply_obstacle_avoidance_xy(
+        3.0, 0.0, x=14.7, y=3.5, config=config, margin=0.0, hard_barrier_only=True,
+    )
+
+    assert d_x == pytest.approx(3.0)
+    assert d_y == pytest.approx(0.0)
 
 
 def test_defender_rejects_diagonal_hj_command_when_pursuit_closes_better():

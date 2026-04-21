@@ -313,6 +313,7 @@ def generate_launch_description():
             'altitude_hold_gain': 0.8,
             'altitude_hold_enabled': False,
             'position_source_preference': 'state_topic',
+            'obstacle_projection_mode': 'inflated' if is_defender else 'hard_barrier',
         }
 
     def add_px4_adapter_nodes(context):
@@ -408,6 +409,7 @@ def generate_launch_description():
             'command_filter_alpha': 0.35,
             'max_accel_horizontal': 6.0,
             'max_accel_vertical': 4.0,
+            'obstacle_projection_mode': 'auto',
         }],
         output='screen',
     )

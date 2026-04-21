@@ -24,6 +24,80 @@ def _clamp_horizontal_speed(vx, vy, limit):
     return vx * scale, vy * scale
 
 
+def _project_obstacle_velocity(vx, vy, position, obstacle, lookahead, margin, mode='inflated'):
+    """Project a horizontal velocity away from a box obstacle."""
+    if position is None:
+        return vx, vy
+
+    x, y = float(position[0]), float(position[1])
+    px = x + float(vx) * float(lookahead)
+    py = y + float(vy) * float(lookahead)
+
+    inside_now = (
+        obstacle['x_min'] <= x <= obstacle['x_max']
+        and obstacle['y_min'] <= y <= obstacle['y_max']
+    )
+    inside_next = (
+        obstacle['x_min'] <= px <= obstacle['x_max']
+        and obstacle['y_min'] <= py <= obstacle['y_max']
+    )
+
+    entry_side = None
+    if not inside_now and inside_next:
+        if x < obstacle['x_min'] <= px:
+            entry_side = 'left'
+        elif x > obstacle['x_max'] >= px:
+            entry_side = 'right'
+        elif y < obstacle['y_min'] <= py:
+            entry_side = 'bottom'
+        elif y > obstacle['y_max'] >= py:
+            entry_side = 'top'
+
+    if mode == 'hard_barrier':
+        if not (inside_now or inside_next):
+            return vx, vy
+        ref_x, ref_y = (x, y) if inside_now else (px, py)
+    else:
+        near_now = (
+            obstacle['x_min'] - margin <= x <= obstacle['x_max'] + margin
+            and obstacle['y_min'] - margin <= y <= obstacle['y_max'] + margin
+        )
+        near_next = (
+            obstacle['x_min'] - margin <= px <= obstacle['x_max'] + margin
+            and obstacle['y_min'] - margin <= py <= obstacle['y_max'] + margin
+        )
+        if not (near_now or near_next):
+            return vx, vy
+        ref_x, ref_y = x, y
+
+    distances = {
+        'left': abs(ref_x - obstacle['x_min']),
+        'right': abs(ref_x - obstacle['x_max']),
+        'bottom': abs(ref_y - obstacle['y_min']),
+        'top': abs(ref_y - obstacle['y_max']),
+    }
+    side = entry_side if entry_side is not None else min(distances, key=distances.get)
+    push = 1.0 if inside_now else 0.0
+
+    if side == 'left':
+        if vx > 0.0:
+            vx = 0.0
+        vx = min(vx, -push)
+    elif side == 'right':
+        if vx < 0.0:
+            vx = 0.0
+        vx = max(vx, push)
+    elif side == 'bottom':
+        if vy > 0.0:
+            vy = 0.0
+        vy = min(vy, -push)
+    elif side == 'top':
+        if vy < 0.0:
+            vy = 0.0
+        vy = max(vy, push)
+    return vx, vy
+
+
 def _select_control_position(preference, state_position, px4_position):
     """Choose which position estimate should drive safety conditioning.
 
@@ -95,6 +169,7 @@ def main(args=None):
                 self.declare_parameter('altitude_hold_gain', 0.8)
                 self.declare_parameter('altitude_hold_enabled', True)
                 self.declare_parameter('position_source_preference', 'px4_local_position')
+                self.declare_parameter('obstacle_projection_mode', 'inflated')
                 # fmu_topic_prefix: PX4 UXRCE namespace, e.g. 'defender' -> /defender/fmu/in/...
 
                 self.vehicle_id = self.get_parameter('vehicle_id').value
@@ -137,6 +212,9 @@ def main(args=None):
                 self._position_source_preference = str(
                     self.get_parameter('position_source_preference').value
                 ).strip() or 'px4_local_position'
+                self._obstacle_projection_mode = str(
+                    self.get_parameter('obstacle_projection_mode').value
+                ).strip() or 'inflated'
 
                 qos_sub = QoSProfile(
                     reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -464,51 +542,17 @@ def main(args=None):
 
             def _apply_obstacle_projection(self, vx, vy, position=None):
                 position = self._control_position() if position is None else position
-                if position is None:
+                if self._obstacle_projection_mode == 'disabled':
                     return vx, vy
-                x, y = position[0], position[1]
-                obs = self._obstacle
-                margin = self._obstacle_margin
-                px = x + vx * self._safety_lookahead
-                py = y + vy * self._safety_lookahead
-                near_now = (
-                    obs['x_min'] - margin <= x <= obs['x_max'] + margin
-                    and obs['y_min'] - margin <= y <= obs['y_max'] + margin
+                return _project_obstacle_velocity(
+                    vx,
+                    vy,
+                    position,
+                    self._obstacle,
+                    self._safety_lookahead,
+                    self._obstacle_margin,
+                    mode=self._obstacle_projection_mode,
                 )
-                near_next = (
-                    obs['x_min'] - margin <= px <= obs['x_max'] + margin
-                    and obs['y_min'] - margin <= py <= obs['y_max'] + margin
-                )
-                if not (near_now or near_next):
-                    return vx, vy
-
-                distances = {
-                    'left': abs(x - obs['x_min']),
-                    'right': abs(x - obs['x_max']),
-                    'bottom': abs(y - obs['y_min']),
-                    'top': abs(y - obs['y_max']),
-                }
-                side = min(distances, key=distances.get)
-                inside = obs['x_min'] <= x <= obs['x_max'] and obs['y_min'] <= y <= obs['y_max']
-                push = 1.0 if inside else 0.0
-
-                if side == 'left':
-                    if vx > 0.0:
-                        vx = 0.0
-                    vx = min(vx, -push)
-                elif side == 'right':
-                    if vx < 0.0:
-                        vx = 0.0
-                    vx = max(vx, push)
-                elif side == 'bottom':
-                    if vy > 0.0:
-                        vy = 0.0
-                    vy = min(vy, -push)
-                elif side == 'top':
-                    if vy < 0.0:
-                        vy = 0.0
-                    vy = max(vy, push)
-                return vx, vy
 
             def _publish_vehicle_command(self, command: int, param1=0.0, param2=0.0):
                 """Publish a VehicleCommand."""

@@ -7,7 +7,10 @@ directly.
 import math
 import unittest
 
-from reach_avoid_sim.px4_adapter_node import _select_control_position
+from reach_avoid_sim.px4_adapter_node import (
+    _project_obstacle_velocity,
+    _select_control_position,
+)
 
 
 class TestCoordinateConversion(unittest.TestCase):
@@ -95,6 +98,55 @@ class TestControlPositionSelection(unittest.TestCase):
         self.assertEqual(_select_control_position('state_topic', None, px4), px4)
         state = [1.0, 2.0, 3.0]
         self.assertEqual(_select_control_position('px4_local_position', state, None), state)
+
+
+class TestObstacleProjection(unittest.TestCase):
+    def setUp(self):
+        self.obstacle = {
+            'x_min': 15.0,
+            'x_max': 20.0,
+            'y_min': 5.0,
+            'y_max': 20.0,
+        }
+
+    def test_inflated_projection_blocks_forward_motion_before_obstacle(self):
+        vx, vy = _project_obstacle_velocity(
+            3.0,
+            0.0,
+            [14.7, 3.5, 10.0],
+            self.obstacle,
+            lookahead=1.0,
+            margin=3.0,
+            mode='inflated',
+        )
+        self.assertEqual(vx, 0.0)
+        self.assertEqual(vy, 0.0)
+
+    def test_hard_barrier_preserves_hj_motion_outside_obstacle(self):
+        vx, vy = _project_obstacle_velocity(
+            3.0,
+            0.0,
+            [14.7, 3.5, 10.0],
+            self.obstacle,
+            lookahead=1.0,
+            margin=3.0,
+            mode='hard_barrier',
+        )
+        self.assertEqual(vx, 3.0)
+        self.assertEqual(vy, 0.0)
+
+    def test_hard_barrier_still_blocks_predicted_entry(self):
+        vx, vy = _project_obstacle_velocity(
+            3.0,
+            0.0,
+            [14.7, 6.0, 10.0],
+            self.obstacle,
+            lookahead=1.0,
+            margin=3.0,
+            mode='hard_barrier',
+        )
+        self.assertEqual(vx, 0.0)
+        self.assertEqual(vy, 0.0)
 
 
 def enu_to_ned(x_enu, y_enu, z_enu):

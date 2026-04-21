@@ -123,20 +123,42 @@ def _inside_obstacle_xy(x, y, config):
     return None
 
 
-def _apply_obstacle_avoidance_xy(cmd_x, cmd_y, x, y, config):
-    """Project a horizontal command away from nearby box obstacles."""
+def _apply_obstacle_avoidance_xy(cmd_x, cmd_y, x, y, config, margin=1.0, hard_barrier_only=False):
+    """Project a horizontal command away from box obstacles."""
     result_x, result_y = float(cmd_x), float(cmd_y)
-    margin = 1.0
     for obs in config.obstacles:
-        if not (obs.x_min - margin <= x <= obs.x_max + margin and obs.y_min - margin <= y <= obs.y_max + margin):
-            continue
+        px = x + result_x
+        py = y + result_y
+        inside_now = obs.x_min <= x <= obs.x_max and obs.y_min <= y <= obs.y_max
+        inside_next = obs.x_min <= px <= obs.x_max and obs.y_min <= py <= obs.y_max
+        entry_side = None
+        if not inside_now and inside_next:
+            if x < obs.x_min <= px:
+                entry_side = "left"
+            elif x > obs.x_max >= px:
+                entry_side = "right"
+            elif y < obs.y_min <= py:
+                entry_side = "bottom"
+            elif y > obs.y_max >= py:
+                entry_side = "top"
+        if hard_barrier_only:
+            if not (inside_now or inside_next):
+                continue
+            ref_x, ref_y = (x, y) if inside_now else (px, py)
+        else:
+            if not (
+                obs.x_min - margin <= x <= obs.x_max + margin
+                and obs.y_min - margin <= y <= obs.y_max + margin
+            ):
+                continue
+            ref_x, ref_y = x, y
         distances = {
-            "left": abs(x - obs.x_min),
-            "right": abs(x - obs.x_max),
-            "bottom": abs(y - obs.y_min),
-            "top": abs(y - obs.y_max),
+            "left": abs(ref_x - obs.x_min),
+            "right": abs(ref_x - obs.x_max),
+            "bottom": abs(ref_y - obs.y_min),
+            "top": abs(ref_y - obs.y_max),
         }
-        side = min(distances, key=distances.get)
+        side = entry_side if entry_side is not None else min(distances, key=distances.get)
         if side == "left" and result_x > 0:
             result_x = 0.0
         elif side == "right" and result_x < 0:
@@ -406,10 +428,72 @@ def _obstacle_aware_target_point(config, x_a, y_a, obstacle_margin=3.0):
     return post_x, corridor_y
 
 
-def _extract_target_reaching_disturbance(config, x_a, y_a, u_a_h):
-    """Target-directed attacker policy used by the paper-figure simulations."""
+def _phi_a_grid_spacing(vf_data):
+    shape = np.asarray(vf_data.values.shape, dtype=float)
+    denom = np.maximum(shape - 1.0, 1.0)
+    return (np.asarray(vf_data.grid_max, dtype=float) - np.asarray(vf_data.grid_min, dtype=float)) / denom
+
+
+def _local_attacker_reaching_descent(phi_a_reach_data, state, tolerance=1e-4):
+    grid_min = np.asarray(phi_a_reach_data.grid_min, dtype=float)
+    grid_max = np.asarray(phi_a_reach_data.grid_max, dtype=float)
+    spacing = _phi_a_grid_spacing(phi_a_reach_data)
+    current = interpolate_value(phi_a_reach_data, state)
+    best_value = current
+    best_delta = None
+
+    for dx in (-spacing[0], 0.0, spacing[0]):
+        for dy in (-spacing[1], 0.0, spacing[1]):
+            if abs(dx) < 1e-12 and abs(dy) < 1e-12:
+                continue
+            candidate = np.clip(state + np.array([dx, dy], dtype=float), grid_min, grid_max)
+            value = interpolate_value(phi_a_reach_data, candidate)
+            if value < best_value - tolerance:
+                best_value = value
+                best_delta = candidate - state
+    return best_delta
+
+
+def _scale_direction_to_speed(dx, dy, speed_limit):
+    norm = math.hypot(dx, dy)
+    if norm < 1e-12:
+        return 0.0, 0.0
+    scale = float(speed_limit) / norm
+    return float(dx * scale), float(dy * scale)
+
+
+def _extract_target_reaching_disturbance(config, phi_a_reach_data, x_a, y_a, u_a_h):
+    """Online HJ target-reaching attacker policy from ``phi_A_reach``."""
     if _point_in_target_region(config, x_a, y_a):
         return 0.0, 0.0
+    state = np.array([x_a, y_a], dtype=float)
+    state_clamped = np.clip(state, phi_a_reach_data.grid_min, phi_a_reach_data.grid_max)
+    grad = compute_gradient(phi_a_reach_data, state_clamped)
+
+    d_x = 0.0
+    d_y = 0.0
+    if grad[0] > GRADIENT_DEADBAND:
+        d_x = -u_a_h
+    elif grad[0] < -GRADIENT_DEADBAND:
+        d_x = u_a_h
+    if grad[1] > GRADIENT_DEADBAND:
+        d_y = -u_a_h
+    elif grad[1] < -GRADIENT_DEADBAND:
+        d_y = u_a_h
+
+    if abs(grad[0]) < GRADIENT_DEADBAND or abs(grad[1]) < GRADIENT_DEADBAND:
+        delta = _local_attacker_reaching_descent(phi_a_reach_data, state_clamped)
+        if delta is not None:
+            fallback_x, fallback_y = _scale_direction_to_speed(delta[0], delta[1], u_a_h)
+            if abs(grad[0]) < GRADIENT_DEADBAND:
+                d_x = fallback_x
+            if abs(grad[1]) < GRADIENT_DEADBAND:
+                d_y = fallback_y
+
+    d_x, d_y = _clamp_horizontal_speed(d_x, d_y, u_a_h)
+    if abs(d_x) > GRADIENT_DEADBAND or abs(d_y) > GRADIENT_DEADBAND:
+        return d_x, d_y
+
     target_x, target_y = _obstacle_aware_target_point(config, x_a, y_a)
     dx = target_x - x_a
     dy = target_y - y_a
@@ -462,6 +546,7 @@ def run_combined_sim(
     b_z_data = load_value_function(vf_dir / "B_z.npz")
     phi_h_data = load_value_function(vf_dir / "phi_h.npz")
     v_h_t_data = load_value_function(vf_dir / "V_h_T_6d.npz")
+    phi_a_reach_data = load_value_function(vf_dir / "phi_A_reach.npz")
 
     k_x, k_y, k_z = config.defender.k_x, config.defender.k_y, config.defender.k_z
     u_d_h = config.defender.max_speed_horizontal
@@ -562,7 +647,9 @@ def run_combined_sim(
             state_h, state_h_rel,
             k_x, k_y, u_d_h, d_h,
         )
-        d_x, d_y = _extract_target_reaching_disturbance(config, x_a, y_a, u_a_h)
+        d_x, d_y = _extract_target_reaching_disturbance(
+            config, phi_a_reach_data, x_a, y_a, u_a_h,
+        )
 
         # Apply wall-avoidance safety layer to defender controls
         wa = _apply_wall_avoidance(
@@ -570,7 +657,11 @@ def run_combined_sim(
         )
         u_x, u_y, u_z = wa[0], wa[1], wa[2]
         u_x, u_y = _apply_obstacle_avoidance_xy(u_x, u_y, x_d, y_d, config)
-        d_x, d_y = _apply_obstacle_avoidance_xy(d_x, d_y, x_a, y_a, config)
+        # ``phi_A_reach`` is already obstacle-aware, so only keep a hard barrier
+        # here to prevent numerical integration from stepping through the box.
+        d_x, d_y = _apply_obstacle_avoidance_xy(
+            d_x, d_y, x_a, y_a, config, margin=0.0, hard_barrier_only=True,
+        )
 
         # Store
         traj["u_x"][step], traj["u_y"][step], traj["u_z"][step] = u_x, u_y, u_z
