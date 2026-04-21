@@ -16,6 +16,31 @@ DEFAULT_TARGET = {"x_min": 38.0, "x_max": 45.0, "y_min": 10.0, "y_max": 15.0}
 DEFAULT_OBSTACLES = [
     {"x_min": 15.0, "x_max": 20.0, "y_min": 5.0, "y_max": 20.0, "z_min": 0.0, "z_max": 20.0},
 ]
+DEFAULT_D_H = 3.0
+DEFAULT_D_Z = 1.0
+
+
+def _nearest_time_pairs(defender_samples, attacker_samples):
+    """Pair samples by nearest timestamp instead of list index.
+
+    The defender and attacker callbacks are not guaranteed to interleave at the
+    same rate, so zip()-pairing can miss true capture events and distort the
+    minimum-distance summary.
+    """
+    if not defender_samples or not attacker_samples:
+        return []
+
+    pairs = []
+    j = 0
+    for defender in defender_samples:
+        t_def = defender[0]
+        while (
+            j + 1 < len(attacker_samples)
+            and abs(attacker_samples[j + 1][0] - t_def) <= abs(attacker_samples[j][0] - t_def)
+        ):
+            j += 1
+        pairs.append((defender, attacker_samples[j]))
+    return pairs
 
 
 def _load_game_params(path: str) -> dict:
@@ -43,6 +68,7 @@ def main(args=None):
         import rclpy
         from geometry_msgs.msg import PoseStamped
         from rclpy.node import Node
+        from std_msgs.msg import String
 
         class TrajectoryRecorderNode(Node):
             """Records defender and attacker state samples and writes a 3D PNG."""
@@ -73,11 +99,19 @@ def main(args=None):
                 self._attacker_count = 0
                 self._saved = False
                 self._autosave_count = 0
+                self._latest_defender = None
+                self._latest_attacker = None
+                self._terminal_status = ""
+                self._terminal_time = None
+                self._shutdown_timer = None
                 self._output_dir.mkdir(parents=True, exist_ok=True)
 
                 gp = _load_game_params(self._game_params_file)
                 self._room = gp.get("room", {})
                 self._target = gp.get("target_region", DEFAULT_TARGET)
+                capture = gp.get("capture", {})
+                self._d_h = float(capture.get("d_h", DEFAULT_D_H))
+                self._d_z = float(capture.get("d_z", DEFAULT_D_Z))
                 self._obstacles = [
                     _ensure_obstacle_height(obs, self._room.get("z_max", 20.0))
                     for obs in gp.get("obstacles", DEFAULT_OBSTACLES)
@@ -85,6 +119,8 @@ def main(args=None):
 
                 self.create_subscription(PoseStamped, "/defender/state", self._defender_cb, 10)
                 self.create_subscription(PoseStamped, "/attacker/state", self._attacker_cb, 10)
+                self.create_subscription(String, "/game/status", self._status_cb, 10)
+                self._status_pub = self.create_publisher(String, "/game/status", 10)
                 self.create_timer(self._autosave_period_sec, self._autosave_plot)
 
                 signal.signal(signal.SIGTERM, self._handle_signal)
@@ -95,14 +131,23 @@ def main(args=None):
                 )
 
             def _defender_cb(self, msg: PoseStamped):
+                self._latest_defender = self._sample(msg)
                 self._defender_count += 1
                 if self._defender_count % self._sample_stride == 0:
-                    self._defender.append(self._sample(msg))
+                    self._defender.append(self._latest_defender)
+                self._maybe_finish_from_state()
 
             def _attacker_cb(self, msg: PoseStamped):
+                self._latest_attacker = self._sample(msg)
                 self._attacker_count += 1
                 if self._attacker_count % self._sample_stride == 0:
-                    self._attacker.append(self._sample(msg))
+                    self._attacker.append(self._latest_attacker)
+                self._maybe_finish_from_state()
+
+            def _status_cb(self, msg: String):
+                status = msg.data.split("|", 1)[0].strip()
+                if status in ("CAPTURED", "ATTACKER_REACHED_TARGET"):
+                    self._finish_game(status)
 
             def _sample(self, msg: PoseStamped):
                 stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -112,6 +157,63 @@ def main(args=None):
                     float(msg.pose.position.y),
                     float(msg.pose.position.z),
                 )
+
+            def _maybe_finish_from_state(self):
+                if self._terminal_status:
+                    return
+                if self._latest_defender is None or self._latest_attacker is None:
+                    return
+                d = self._latest_defender
+                a = self._latest_attacker
+                h_dist = float(np.hypot(d[1] - a[1], d[2] - a[2]))
+                z_dist = abs(d[3] - a[3])
+                if h_dist <= self._d_h and z_dist <= self._d_z:
+                    self._finish_game("CAPTURED", max(d[0], a[0]))
+                    return
+                if self._point_in_target(a):
+                    self._finish_game("ATTACKER_REACHED_TARGET", a[0])
+
+            def _point_in_target(self, sample):
+                _, x, y, _ = sample
+                target = self._target
+                return (
+                    target.get("x_min", 38.0) <= x <= target.get("x_max", 45.0)
+                    and target.get("y_min", 10.0) <= y <= target.get("y_max", 15.0)
+                )
+
+            def _finish_game(self, status, event_time=None):
+                if self._terminal_status:
+                    return
+                self._terminal_status = status
+                self._terminal_time = event_time
+                msg = String()
+                msg.data = status
+                self._status_pub.publish(msg)
+                self.get_logger().info(
+                    f"Terminal game status {status}"
+                    + (
+                        f" at t={event_time:.2f}s"
+                        if event_time is not None
+                        else ""
+                    )
+                )
+                self.save_plot()
+                self._schedule_shutdown()
+
+            def _schedule_shutdown(self):
+                if self._shutdown_timer is not None:
+                    return
+                self._shutdown_timer = self.create_timer(0.5, self._shutdown_launch)
+
+            def _shutdown_launch(self):
+                if self._shutdown_timer is not None:
+                    self._shutdown_timer.cancel()
+                    self._shutdown_timer = None
+                self.save_plot()
+                try:
+                    os.kill(os.getppid(), signal.SIGINT)
+                except ProcessLookupError:
+                    pass
 
             def _handle_signal(self, signum, frame):
                 self.save_plot()
@@ -125,7 +227,7 @@ def main(args=None):
                 self._write_plot(output_path)
                 self._write_data_sidecars("full_game_trajectory_latest")
                 self.get_logger().info(
-                    f"Autosaved 3D trajectory plot to {output_path} "
+                    f"Autosaved trajectory views to {output_path} "
                     f"(defender_samples={len(self._defender)}, attacker_samples={len(self._attacker)})"
                 )
 
@@ -150,7 +252,7 @@ def main(args=None):
                     self._write_plot(latest_path)
                     self._write_data_sidecars("full_game_trajectory_latest")
                 self.get_logger().info(
-                    f"Saved 3D trajectory plot to {output_path} "
+                    f"Saved trajectory views to {output_path} "
                     f"(defender_samples={len(self._defender)}, attacker_samples={len(self._attacker)})"
                 )
 
@@ -198,7 +300,7 @@ def main(args=None):
                         and target.get("y_min", 10.0) <= y <= target.get("y_max", 15.0)
                     )
 
-                paired = zip(self._defender, self._attacker)
+                paired = _nearest_time_pairs(self._defender, self._attacker)
                 min_horizontal = None
                 min_vertical = None
                 capture_count = 0
@@ -207,7 +309,7 @@ def main(args=None):
                     z = abs(d[3] - a[3])
                     min_horizontal = h if min_horizontal is None else min(min_horizontal, h)
                     min_vertical = z if min_vertical is None else min(min_vertical, z)
-                    if h <= 3.0 and z <= 1.0:
+                    if h <= self._d_h and z <= self._d_z:
                         capture_count += 1
 
                 all_samples = self._defender + self._attacker
@@ -221,22 +323,42 @@ def main(args=None):
                     "defender_obstacle_samples": sum(1 for s in self._defender if inside_obstacle(s)),
                     "attacker_obstacle_samples": sum(1 for s in self._attacker if inside_obstacle(s)),
                     "outside_room_samples": sum(1 for s in all_samples if not inside_room(s)),
+                    "terminal_status": self._terminal_status or None,
+                    "terminal_time": self._terminal_time,
                 }
 
             def _write_plot(self, output_path):
-                fig = plt.figure(figsize=(11, 8))
-                ax = fig.add_subplot(111, projection="3d")
-                self._plot_geometry(ax)
-                self._plot_path(ax, self._defender, "Defender", "#2563eb")
-                self._plot_path(ax, self._attacker, "Attacker", "#dc2626")
-                self._set_axes(ax)
-                ax.legend(loc="upper left")
-                ax.set_title("Full Game Gazebo Trajectory")
-                fig.tight_layout()
+                fig = plt.figure(figsize=(16, 10), constrained_layout=True)
+                grid = fig.add_gridspec(2, 2, width_ratios=[1.6, 1.0], hspace=0.18, wspace=0.18)
+
+                ax_3d = fig.add_subplot(grid[:, 0], projection="3d")
+                self._plot_geometry_3d(ax_3d)
+                self._plot_path_3d(ax_3d, self._defender, "Defender", "#2563eb")
+                self._plot_path_3d(ax_3d, self._attacker, "Attacker", "#dc2626")
+                self._set_axes_3d(ax_3d)
+                ax_3d.legend(loc="upper left")
+                ax_3d.set_title("3D Trajectory")
+
+                ax_top = fig.add_subplot(grid[0, 1])
+                self._plot_geometry_top(ax_top)
+                self._plot_path_2d(ax_top, self._defender, "Defender", "#2563eb", 1, 2)
+                self._plot_path_2d(ax_top, self._attacker, "Attacker", "#dc2626", 1, 2)
+                self._set_axes_top(ax_top)
+                ax_top.set_title("Top View (x-y)")
+
+                ax_side = fig.add_subplot(grid[1, 1])
+                self._plot_geometry_side(ax_side)
+                self._plot_path_2d(ax_side, self._defender, "Defender", "#2563eb", 1, 3)
+                self._plot_path_2d(ax_side, self._attacker, "Attacker", "#dc2626", 1, 3)
+                self._set_axes_side(ax_side)
+                ax_side.set_title("Side View (x-z)")
+
+                terminal = self._terminal_status or "IN_PROGRESS"
+                fig.suptitle(f"Full Game Gazebo Trajectory — {terminal}", fontsize=14, y=0.98)
                 fig.savefig(output_path, dpi=180)
                 plt.close(fig)
 
-            def _plot_path(self, ax, samples, label, color):
+            def _plot_path_3d(self, ax, samples, label, color):
                 if not samples:
                     return
                 arr = np.asarray(samples, dtype=float)
@@ -244,7 +366,15 @@ def main(args=None):
                 ax.scatter(arr[0, 1], arr[0, 2], arr[0, 3], color=color, marker="o", s=35)
                 ax.scatter(arr[-1, 1], arr[-1, 2], arr[-1, 3], color=color, marker="x", s=55)
 
-            def _plot_geometry(self, ax):
+            def _plot_path_2d(self, ax, samples, label, color, x_idx, y_idx):
+                if not samples:
+                    return
+                arr = np.asarray(samples, dtype=float)
+                ax.plot(arr[:, x_idx], arr[:, y_idx], color=color, linewidth=2.0, label=label)
+                ax.scatter(arr[0, x_idx], arr[0, y_idx], color=color, marker="o", s=35)
+                ax.scatter(arr[-1, x_idx], arr[-1, y_idx], color=color, marker="x", s=55)
+
+            def _plot_geometry_3d(self, ax):
                 target = self._target
                 self._plot_box(
                     ax,
@@ -270,6 +400,59 @@ def main(args=None):
                         alpha=0.16,
                     )
 
+            def _plot_geometry_top(self, ax):
+                import matplotlib.patches as mpatches
+
+                for obs in self._obstacles:
+                    rect = mpatches.Rectangle(
+                        (obs.get("x_min", 15.0), obs.get("y_min", 5.0)),
+                        obs.get("x_max", 20.0) - obs.get("x_min", 15.0),
+                        obs.get("y_max", 20.0) - obs.get("y_min", 5.0),
+                        linewidth=1.5,
+                        edgecolor="#6b7280",
+                        facecolor="#6b7280",
+                        alpha=0.18,
+                    )
+                    ax.add_patch(rect)
+                target = self._target
+                rect = mpatches.Rectangle(
+                    (target.get("x_min", 38.0), target.get("y_min", 10.0)),
+                    target.get("x_max", 45.0) - target.get("x_min", 38.0),
+                    target.get("y_max", 15.0) - target.get("y_min", 10.0),
+                    linewidth=1.5,
+                    edgecolor="#22c55e",
+                    facecolor="#22c55e",
+                    alpha=0.18,
+                )
+                ax.add_patch(rect)
+
+            def _plot_geometry_side(self, ax):
+                import matplotlib.patches as mpatches
+
+                room_z_max = self._room.get("z_max", 20.0)
+                for obs in self._obstacles:
+                    rect = mpatches.Rectangle(
+                        (obs.get("x_min", 15.0), obs.get("z_min", 0.0)),
+                        obs.get("x_max", 20.0) - obs.get("x_min", 15.0),
+                        obs.get("z_max", room_z_max) - obs.get("z_min", 0.0),
+                        linewidth=1.5,
+                        edgecolor="#6b7280",
+                        facecolor="#6b7280",
+                        alpha=0.18,
+                    )
+                    ax.add_patch(rect)
+                target = self._target
+                rect = mpatches.Rectangle(
+                    (target.get("x_min", 38.0), 0.0),
+                    target.get("x_max", 45.0) - target.get("x_min", 38.0),
+                    0.25,
+                    linewidth=1.5,
+                    edgecolor="#22c55e",
+                    facecolor="#22c55e",
+                    alpha=0.18,
+                )
+                ax.add_patch(rect)
+
             def _plot_box(self, ax, x0, x1, y0, y1, z0, z1, color, alpha):
                 import numpy as np
 
@@ -283,7 +466,7 @@ def main(args=None):
                 for y in [y0, y1]:
                     ax.plot_surface(xx, np.full_like(xx, y), zz, color=color, alpha=alpha, shade=False)
 
-            def _set_axes(self, ax):
+            def _set_axes_3d(self, ax):
                 room = self._room
                 ax.set_xlim(room.get("x_min", 0.0), room.get("x_max", 45.0))
                 ax.set_ylim(room.get("y_min", 0.0), room.get("y_max", 25.0))
@@ -292,6 +475,23 @@ def main(args=None):
                 ax.set_ylabel("y [m]")
                 ax.set_zlabel("z [m]")
                 ax.view_init(elev=28, azim=-58)
+
+            def _set_axes_top(self, ax):
+                room = self._room
+                ax.set_xlim(room.get("x_min", 0.0), room.get("x_max", 45.0))
+                ax.set_ylim(room.get("y_min", 0.0), room.get("y_max", 25.0))
+                ax.set_xlabel("x [m]")
+                ax.set_ylabel("y [m]")
+                ax.set_aspect("equal", adjustable="box")
+                ax.grid(True, alpha=0.3)
+
+            def _set_axes_side(self, ax):
+                room = self._room
+                ax.set_xlim(room.get("x_min", 0.0), room.get("x_max", 45.0))
+                ax.set_ylim(room.get("z_min", 0.0), room.get("z_max", 20.0))
+                ax.set_xlabel("x [m]")
+                ax.set_ylabel("z [m]")
+                ax.grid(True, alpha=0.3)
 
         rclpy.init(args=args)
         node = TrajectoryRecorderNode()

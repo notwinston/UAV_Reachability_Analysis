@@ -653,6 +653,8 @@ def main(args=None):
                 self._attacker_vel = None  # [vx, vy, vz]
                 self._filtered_cmd = np.array([0.0, 0.0, 0.0], dtype=float)
                 self._last_filter_time = None
+                self._terminal_stop = False
+                self._terminal_status = "UNKNOWN"
 
                 # Subscribers
                 self.create_subscription(
@@ -666,6 +668,9 @@ def main(args=None):
                 )
                 self.create_subscription(
                     TwistStamped, "/attacker/velocity", self._attacker_vel_cb, 10
+                )
+                self.create_subscription(
+                    String, "/game/status", self._game_status_cb, 10
                 )
 
                 # Publishers
@@ -705,8 +710,21 @@ def main(args=None):
                     msg.twist.linear.z,
                 ])
 
+            def _game_status_cb(self, msg: String):
+                status = msg.data.split("|", 1)[0].strip()
+                if status in ("CAPTURED", "ATTACKER_REACHED_TARGET"):
+                    self._terminal_stop = True
+                    self._terminal_status = status
+
             def _control_loop(self):
                 """50Hz control loop implementing Algorithm 1 + Algorithm 2."""
+                if self._terminal_stop:
+                    self._publish_hover()
+                    status_msg = String()
+                    status_msg.data = self._terminal_status
+                    self._status_pub.publish(status_msg)
+                    return
+
                 # Safe fallback: if value functions not loaded, hover
                 if self._logic is None:
                     self.get_logger().warn(

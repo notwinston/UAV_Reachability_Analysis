@@ -52,3 +52,22 @@ def test_defender_accepts_hj_command_aligned_with_pursuit():
     pid_x, pid_y = 0.0, 6.0
 
     assert sim._horizontal_command_is_useful(hj_x, hj_y, pid_x, pid_y, x_rel, y_rel)
+
+
+def test_combined_sim_stops_at_first_terminal_event():
+    sim = _load_numerical_sim_module()
+    config = GameConfig.from_yaml(Path(__file__).resolve().parents[2] / "config" / "game_params.yaml")
+
+    result = sim.run_combined_sim(
+        config,
+        str(Path(__file__).resolve().parents[2] / "data" / "value_functions"),
+        dt=0.01,
+        T=40.0,
+        initial_defender_pos=[32.0, 22.0, 7.0],
+        initial_attacker_pos=[3.0, 2.0, 4.0],
+    )
+
+    assert result["terminal_time"] is not None
+    assert len(result["x_d"]) == len(result["u_x"]) + 1
+    assert result["T"] == pytest.approx(len(result["u_x"]) * result["dt"])
+    assert len(result["u_x"]) < int(40.0 / 0.01)

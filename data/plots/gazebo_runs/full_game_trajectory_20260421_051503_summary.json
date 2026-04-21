@@ -1,0 +1,13 @@
+{
+  "attacker_obstacle_samples": 0,
+  "attacker_samples": 610,
+  "attacker_target_samples": 0,
+  "capture_samples": 0,
+  "defender_obstacle_samples": 0,
+  "defender_samples": 609,
+  "min_horizontal_distance": 0.25618129038415344,
+  "min_vertical_distance": 0.00360107421875,
+  "outside_room_samples": 0,
+  "terminal_status": "CAPTURED",
+  "terminal_time": 1776748503.5466
+}

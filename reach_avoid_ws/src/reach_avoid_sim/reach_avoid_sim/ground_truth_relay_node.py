@@ -5,6 +5,24 @@ Falls back to PX4 vehicle_local_position DDS topics for setups without the
 Gazebo pose bridge.
 """
 
+
+def _matches_exact_model_pose(child_frame_id: str, model_name: str) -> bool:
+    """Return True only for the model pose itself, not child links/sensors.
+
+    ros_gz_bridge converts Gazebo Pose_V arrays into TF-style frame names.
+    Model child frames often include scoped names such as:
+      - "x500_1::base_link"
+      - "reach_avoid_arena/x500_1::camera_link"
+    We only want the model pose (e.g. "x500_1" or ".../x500_1"), because
+    child-link transforms can be relative or otherwise unsuitable as the
+    game-state source.
+    """
+    if not child_frame_id:
+        return False
+    normalized = child_frame_id.replace("::", "/")
+    tokens = [token for token in normalized.split("/") if token]
+    return bool(tokens) and tokens[-1] == model_name
+
 def main(args=None):
     try:
         import math
@@ -28,6 +46,7 @@ def main(args=None):
                 self.declare_parameter('attacker_model_name', 'x500_2')
                 self.declare_parameter('world_name', 'reach_avoid_arena')
                 self.declare_parameter('publish_rate', 50.0)
+                self.declare_parameter('use_gazebo_pose_info', False)
                 # Spawn positions (must match simulation.launch.py PX4_GZ_MODEL_POSE)
                 self.declare_parameter('defender_spawn_x', 5.0)
                 self.declare_parameter('defender_spawn_y', 12.5)
@@ -39,6 +58,7 @@ def main(args=None):
                 self._defender_model = self.get_parameter('defender_model_name').value
                 self._attacker_model = self.get_parameter('attacker_model_name').value
                 publish_rate = self.get_parameter('publish_rate').value
+                self._use_gz_pose_info = bool(self.get_parameter('use_gazebo_pose_info').value)
 
                 self._defender_spawn = [
                     self.get_parameter('defender_spawn_x').value,
@@ -56,7 +76,8 @@ def main(args=None):
                 self.defender_vel_pub = self.create_publisher(TwistStamped, '/defender/velocity', 10)
                 self.attacker_pose_pub = self.create_publisher(PoseStamped, '/attacker/state', 10)
                 self.attacker_vel_pub = self.create_publisher(TwistStamped, '/attacker/velocity', 10)
-                self.create_subscription(TFMessage, '/gz/pose_info', self._gz_pose_cb, 10)
+                if self._use_gz_pose_info:
+                    self.create_subscription(TFMessage, '/gz/pose_info', self._gz_pose_cb, 10)
 
                 qos_px4 = QoSProfile(
                     reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -75,9 +96,15 @@ def main(args=None):
                         '/attacker/fmu/out/vehicle_local_position_v1',
                         self._attacker_cb, qos_px4)
 
-                    self.get_logger().info(
-                        'Using Gazebo /gz/pose_info for ground truth with PX4 local-position fallback'
-                    )
+                    if self._use_gz_pose_info:
+                        self.get_logger().info(
+                            'Ground truth relay using Gazebo /gz/pose_info when an exact model pose '
+                            'is available, with PX4 local-position fallback'
+                        )
+                    else:
+                        self.get_logger().info(
+                            'Ground truth relay using PX4 local-position as the primary state source'
+                        )
                 else:
                     self.get_logger().error('px4_msgs not available — cannot relay ground truth')
 
@@ -98,11 +125,11 @@ def main(args=None):
             def _gz_pose_cb(self, msg: TFMessage):
                 for transform in msg.transforms:
                     name = transform.child_frame_id
-                    if self._defender_model in name:
+                    if _matches_exact_model_pose(name, self._defender_model):
                         self._latest_defender_pose, self._latest_defender_vel = \
                             self._convert_gz_transform(transform, 'defender')
                         self._have_gz_defender = True
-                    elif self._attacker_model in name:
+                    elif _matches_exact_model_pose(name, self._attacker_model):
                         self._latest_attacker_pose, self._latest_attacker_vel = \
                             self._convert_gz_transform(transform, 'attacker')
                         self._have_gz_attacker = True

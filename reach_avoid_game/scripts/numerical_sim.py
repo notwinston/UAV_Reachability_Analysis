@@ -32,6 +32,15 @@ HORIZONTAL_HJ_MIN_CLOSURE_FRACTION = 0.85
 ATTACKER_TARGET_ALTITUDE = 10.0
 
 
+def _parse_start_pose(value):
+    parts = [float(part.strip()) for part in value.split(",")]
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError(
+            f"start pose must be formatted as x,y,z, got {value!r}"
+        )
+    return parts
+
+
 def _clamp_horizontal_speed(cmd_x, cmd_y, speed_limit):
     """Clamp a horizontal command to the configured speed magnitude."""
     speed = math.hypot(cmd_x, cmd_y)
@@ -508,7 +517,9 @@ def run_combined_sim(
     first_capture_step = None
     first_target_step = None
 
+    executed_steps = 0
     for step in range(n_steps):
+        executed_steps = step + 1
         # Vertical states
         state_z_3d = np.array([z_d, v_dz, z_a])
         z_rel = z_d - z_a
@@ -628,6 +639,14 @@ def run_combined_sim(
             if not attacker_reached_target:
                 first_target_step = step
             attacker_reached_target = True
+        if first_capture_step is not None or first_target_step is not None:
+            break
+
+    state_len = executed_steps + 1
+    for key in ("x_d", "y_d", "z_d", "v_dx", "v_dy", "v_dz", "x_a", "y_a", "z_a"):
+        traj[key] = traj[key][:state_len]
+    for key in ("u_x", "u_y", "u_z", "d_x", "d_y", "d_z_ctrl", "mode_z", "mode_h"):
+        traj[key] = traj[key][:executed_steps]
 
     # Determine outcome: first event wins
     if first_capture_step is not None and first_target_step is not None:
@@ -651,7 +670,16 @@ def run_combined_sim(
     traj["outcome"] = outcome
     traj["obstacle_violation"] = trajectory_hits_obstacle(traj, config)
     traj["dt"] = dt
-    traj["T"] = T
+    traj["T"] = executed_steps * dt
+    if first_capture_step is not None or first_target_step is not None:
+        decisive_step = first_capture_step
+        if decisive_step is None or (
+            first_target_step is not None and first_target_step < decisive_step
+        ):
+            decisive_step = first_target_step
+        traj["terminal_time"] = None if decisive_step is None else (decisive_step + 1) * dt
+    else:
+        traj["terminal_time"] = None
 
     return traj
 
@@ -670,6 +698,10 @@ def main():
                         help="Path to game configuration YAML")
     parser.add_argument("--output-dir", default="data/simulations",
                         help="Directory for saved simulation .npz files")
+    parser.add_argument("--defender-start", type=_parse_start_pose, default=None,
+                        help="Initial defender pose for combined mode as x,y,z")
+    parser.add_argument("--attacker-start", type=_parse_start_pose, default=None,
+                        help="Initial attacker pose for combined mode as x,y,z")
     args = parser.parse_args()
 
     config = GameConfig.from_yaml(args.config)
@@ -707,6 +739,8 @@ def main():
         result = run_combined_sim(
             config=config, vf_dir=args.value_function_dir,
             dt=args.dt, T=args.T, check_only=args.check_only,
+            initial_defender_pos=args.defender_start,
+            initial_attacker_pos=args.attacker_start,
         )
 
         if args.check_only:
@@ -723,6 +757,7 @@ def main():
         save_data = {k: result[k] for k in save_keys}
         save_data["dt"] = result["dt"]
         save_data["T"] = result["T"]
+        save_data["terminal_time"] = -1.0 if result["terminal_time"] is None else result["terminal_time"]
         np.savez(output_path, **save_data)
         print(f"Trajectory saved to {output_path}")
 
@@ -732,6 +767,10 @@ def main():
         print(f"Horizontal capture: {result['captured_h']}")
         print(f"Vertical capture: {result['captured_z']}")
         print(f"3D capture: {result['captured_3d']}")
+        print(f"Attacker reached target: {result['attacker_reached_target']}")
+        print(f"Outcome: {result['outcome']}")
+        if result["terminal_time"] is not None:
+            print(f"Terminal event at t={result['terminal_time']:.2f}s")
         print(f"Final horizontal distance: {h_dist[-1]:.3f}m")
         print(f"Final vertical distance: {z_dist[-1]:.3f}m")
         print(f"Min horizontal distance: {h_dist.min():.3f}m at t={np.argmin(h_dist) * result['dt']:.2f}s")

@@ -312,6 +312,7 @@ def generate_launch_description():
             'max_speed_vertical': max_speed_z,
             'altitude_hold_gain': 0.8,
             'altitude_hold_enabled': False,
+            'position_source_preference': 'state_topic',
         }
 
     def add_px4_adapter_nodes(context):
@@ -348,6 +349,7 @@ def generate_launch_description():
                 'attacker_model_name': 'x500_2',
                 'world_name': 'reach_avoid_arena',
                 'publish_rate': 50.0,
+                'use_gazebo_pose_info': True,
                 'defender_spawn_x': defender_spawn[0],
                 'defender_spawn_y': defender_spawn[1],
                 'defender_spawn_z': defender_spawn[2],

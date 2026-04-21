@@ -7,6 +7,8 @@ directly.
 import math
 import unittest
 
+from reach_avoid_sim.px4_adapter_node import _select_control_position
+
 
 class TestCoordinateConversion(unittest.TestCase):
     """Test ENU <-> NED coordinate conversions."""
@@ -70,6 +72,29 @@ class TestCoordinateConversion(unittest.TestCase):
         self.assertAlmostEqual(x_ned, -3.0)
         self.assertAlmostEqual(y_ned, -2.0)
         self.assertAlmostEqual(z_ned, 1.0)
+
+
+class TestControlPositionSelection(unittest.TestCase):
+    def test_prefers_state_topic_when_requested(self):
+        state = [1.0, 2.0, 3.0]
+        px4 = [4.0, 5.0, 6.0]
+        self.assertEqual(_select_control_position('state_topic', state, px4), state)
+
+    def test_prefers_px4_when_requested(self):
+        state = [1.0, 2.0, 3.0]
+        px4 = [4.0, 5.0, 6.0]
+        self.assertEqual(_select_control_position('px4_local_position', state, px4), px4)
+
+    def test_auto_prefers_state_when_available(self):
+        state = [1.0, 2.0, 3.0]
+        px4 = [4.0, 5.0, 6.0]
+        self.assertEqual(_select_control_position('auto', state, px4), state)
+
+    def test_falls_back_when_preferred_source_missing(self):
+        px4 = [4.0, 5.0, 6.0]
+        self.assertEqual(_select_control_position('state_topic', None, px4), px4)
+        state = [1.0, 2.0, 3.0]
+        self.assertEqual(_select_control_position('px4_local_position', state, None), state)
 
 
 def enu_to_ned(x_enu, y_enu, z_enu):

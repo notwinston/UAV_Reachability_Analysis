@@ -43,12 +43,12 @@ Paper figures (static value-function visualizations):
 Simulation figures (40 s forward-Euler trajectories, defender at (35, 20, 8),
                     attacker at (5, 3, 3) — opposite corners, attacker behind obstacle):
 
-  fig_11.png — Side-by-side simulation summary: left panel shows 2D (x, y) paths
-               for both agents with obstacles and target; right panel shows altitude
-               z_D and z_A vs time with the vertical capture band and mode annotations.
+  fig_11.png — Three-panel simulation summary: top-down (x, y) trajectories,
+               side-view (x, z) trajectories, and altitude z_D / z_A vs time
+               with the vertical capture band and mode annotations.
 
-  fig_12.png — Full 3D trajectory view.  Both drone paths plotted in (x, y, z) space
-               with obstacle wireframes and the target floor outline.
+  fig_12.png — Combined trajectory layout with a full 3D view plus companion
+               top-down and side-view projections for easier inspection.
 
 Analysis figures (derived from the same simulation run):
 
@@ -483,16 +483,7 @@ def _run_combined_for_fig(config, vf_dir, sim_start=None):
     )
 
 
-def fig11_simulation_trajectories(vf_dir, output_dir, config, sim_start=None):
-    """Fig 11 — Simulation trajectories: x-y and z-t side by side."""
-    traj = _run_combined_for_fig(config, vf_dir, sim_start)
-    if traj.get("obstacle_violation", False):
-        raise ValueError("combined simulation trajectory enters an obstacle")
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
-    # Left: x-y trajectories
-    ax = axes[0]
+def _plot_top_view(ax, traj, config):
     ax.plot(traj["x_d"], traj["y_d"], "b-", linewidth=2, label="Defender")
     ax.plot(traj["x_a"], traj["y_a"], "r-", linewidth=2, label="Attacker")
     ax.plot(traj["x_d"][0], traj["y_d"][0], "bs", markersize=10)
@@ -500,26 +491,93 @@ def fig11_simulation_trajectories(vf_dir, output_dir, config, sim_start=None):
     ax.plot(traj["x_d"][-1], traj["y_d"][-1], "bo", markersize=8)
     ax.plot(traj["x_a"][-1], traj["y_a"][-1], "ro", markersize=8)
 
-    # Obstacles and target
     for obs in config.obstacles:
-        rect = Rectangle((obs.x_min, obs.y_min), obs.x_max - obs.x_min, obs.y_max - obs.y_min,
-                         linewidth=2, edgecolor="red", facecolor="red", alpha=0.2)
+        rect = Rectangle(
+            (obs.x_min, obs.y_min),
+            obs.x_max - obs.x_min,
+            obs.y_max - obs.y_min,
+            linewidth=2,
+            edgecolor="red",
+            facecolor="red",
+            alpha=0.2,
+        )
         ax.add_patch(rect)
     tr = config.target_region
-    rect_t = Rectangle((tr.x_min, tr.y_min), tr.x_max - tr.x_min, tr.y_max - tr.y_min,
-                       linewidth=2, edgecolor="green", facecolor="green", alpha=0.2)
+    rect_t = Rectangle(
+        (tr.x_min, tr.y_min),
+        tr.x_max - tr.x_min,
+        tr.y_max - tr.y_min,
+        linewidth=2,
+        edgecolor="green",
+        facecolor="green",
+        alpha=0.2,
+    )
     ax.add_patch(rect_t)
 
     ax.set_xlabel("x (m)", fontsize=12)
     ax.set_ylabel("y (m)", fontsize=12)
-    ax.set_title("Horizontal Trajectories", fontsize=13)
+    ax.set_title("Top View (x-y)", fontsize=13)
     ax.legend(loc="upper left")
     ax.grid(True, alpha=0.3)
     ax.set_xlim(config.room.x_min - 1, config.room.x_max + 1)
     ax.set_ylim(config.room.y_min - 1, config.room.y_max + 1)
+    ax.set_aspect("equal", adjustable="box")
 
-    # Right: z vs t
-    ax2 = axes[1]
+
+def _plot_side_view(ax, traj, config):
+    ax.plot(traj["x_d"], traj["z_d"], "b-", linewidth=2, label="Defender")
+    ax.plot(traj["x_a"], traj["z_a"], "r-", linewidth=2, label="Attacker")
+    ax.plot(traj["x_d"][0], traj["z_d"][0], "bs", markersize=10)
+    ax.plot(traj["x_a"][0], traj["z_a"][0], "rs", markersize=10)
+    ax.plot(traj["x_d"][-1], traj["z_d"][-1], "bo", markersize=8)
+    ax.plot(traj["x_a"][-1], traj["z_a"][-1], "ro", markersize=8)
+
+    for obs in config.obstacles:
+        rect = Rectangle(
+            (obs.x_min, 0.0),
+            obs.x_max - obs.x_min,
+            config.room.z_max,
+            linewidth=2,
+            edgecolor="red",
+            facecolor="red",
+            alpha=0.15,
+        )
+        ax.add_patch(rect)
+    tr = config.target_region
+    rect_t = Rectangle(
+        (tr.x_min, 0.0),
+        tr.x_max - tr.x_min,
+        0.25,
+        linewidth=2,
+        edgecolor="green",
+        facecolor="green",
+        alpha=0.2,
+    )
+    ax.add_patch(rect_t)
+
+    ax.set_xlabel("x (m)", fontsize=12)
+    ax.set_ylabel("z (m)", fontsize=12)
+    ax.set_title("Side View (x-z)", fontsize=13)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(config.room.x_min - 1, config.room.x_max + 1)
+    ax.set_ylim(config.room.z_min - 0.5, config.room.z_max + 0.5)
+
+
+def fig11_simulation_trajectories(vf_dir, output_dir, config, sim_start=None):
+    """Fig 11 — Simulation trajectories: top view, side view, and altitude timeline."""
+    traj = _run_combined_for_fig(config, vf_dir, sim_start)
+    if traj.get("obstacle_violation", False):
+        raise ValueError("combined simulation trajectory enters an obstacle")
+
+    fig, axes = plt.subplots(1, 3, figsize=(22, 6))
+
+    ax = axes[0]
+    _plot_top_view(ax, traj, config)
+
+    ax_side = axes[1]
+    _plot_side_view(ax_side, traj, config)
+
+    ax2 = axes[2]
     dt = traj["dt"]
     n_pts = len(traj["z_d"])
     t = np.arange(n_pts) * dt
@@ -553,13 +611,14 @@ def fig11_simulation_trajectories(vf_dir, output_dir, config, sim_start=None):
 
 
 def fig12_combined_3d(vf_dir, output_dir, config, sim_start=None):
-    """Fig 12 — Combined 3D game view: 3D plot of both drone paths."""
+    """Fig 12 — Combined 3D game view with companion top and side projections."""
     traj = _run_combined_for_fig(config, vf_dir, sim_start)
     if traj.get("obstacle_violation", False):
         raise ValueError("combined simulation trajectory enters an obstacle")
 
-    fig = plt.figure(figsize=(12, 9))
-    ax = fig.add_subplot(111, projection="3d")
+    fig = plt.figure(figsize=(16, 10), constrained_layout=True)
+    grid = fig.add_gridspec(2, 2, width_ratios=[1.6, 1.0], hspace=0.18, wspace=0.18)
+    ax = fig.add_subplot(grid[:, 0], projection="3d")
 
     ax.plot(traj["x_d"], traj["y_d"], traj["z_d"], "b-", linewidth=2, label="Defender")
     ax.plot(traj["x_a"], traj["y_a"], traj["z_a"], "r-", linewidth=2, label="Attacker")
@@ -590,10 +649,19 @@ def fig12_combined_3d(vf_dir, output_dir, config, sim_start=None):
     ax.set_xlabel("x (m)", fontsize=11)
     ax.set_ylabel("y (m)", fontsize=11)
     ax.set_zlabel("z (m)", fontsize=11)
-    ax.set_title(f"3D Game Trajectories — {traj['outcome']}", fontsize=13)
+    ax.set_title("3D Trajectory", fontsize=13)
     ax.legend(loc="upper left")
+    ax.set_xlim(config.room.x_min, config.room.x_max)
+    ax.set_ylim(config.room.y_min, config.room.y_max)
+    ax.set_zlim(config.room.z_min, config.room.z_max)
 
-    fig.tight_layout()
+    ax_top = fig.add_subplot(grid[0, 1])
+    _plot_top_view(ax_top, traj, config)
+
+    ax_side = fig.add_subplot(grid[1, 1])
+    _plot_side_view(ax_side, traj, config)
+
+    fig.suptitle(f"Game Trajectories — {traj['outcome']}", fontsize=14, y=0.98)
     fig.savefig(str(output_dir / "fig_12.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("  Saved fig_12.png (3D game view)")

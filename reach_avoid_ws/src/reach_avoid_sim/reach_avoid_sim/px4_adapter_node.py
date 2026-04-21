@@ -24,6 +24,27 @@ def _clamp_horizontal_speed(vx, vy, limit):
     return vx * scale, vy * scale
 
 
+def _select_control_position(preference, state_position, px4_position):
+    """Choose which position estimate should drive safety conditioning.
+
+    Parameters
+    ----------
+    preference:
+        One of ``auto``, ``state_topic``, or ``px4_local_position``.
+    state_position:
+        Position from the relay / state topic in ENU world coordinates.
+    px4_position:
+        Position reconstructed from PX4 VehicleLocalPosition in ENU.
+    """
+    if preference == 'state_topic':
+        return state_position if state_position is not None else px4_position
+    if preference == 'px4_local_position':
+        return px4_position if px4_position is not None else state_position
+    if state_position is not None:
+        return state_position
+    return px4_position
+
+
 def main(args=None):
     try:
         import rclpy
@@ -73,6 +94,7 @@ def main(args=None):
                 self.declare_parameter('max_speed_vertical', 0.6)
                 self.declare_parameter('altitude_hold_gain', 0.8)
                 self.declare_parameter('altitude_hold_enabled', True)
+                self.declare_parameter('position_source_preference', 'px4_local_position')
                 # fmu_topic_prefix: PX4 UXRCE namespace, e.g. 'defender' -> /defender/fmu/in/...
 
                 self.vehicle_id = self.get_parameter('vehicle_id').value
@@ -112,6 +134,9 @@ def main(args=None):
                 self._max_speed_z = float(self.get_parameter('max_speed_vertical').value)
                 self._altitude_hold_gain = float(self.get_parameter('altitude_hold_gain').value)
                 self._altitude_hold_enabled = bool(self.get_parameter('altitude_hold_enabled').value)
+                self._position_source_preference = str(
+                    self.get_parameter('position_source_preference').value
+                ).strip() or 'px4_local_position'
 
                 qos_sub = QoSProfile(
                     reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -316,10 +341,19 @@ def main(args=None):
                 msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
                 self.trajectory_pub.publish(msg)
 
+            def _control_position(self):
+                """Choose the position source used for safety conditioning."""
+                return _select_control_position(
+                    self._position_source_preference,
+                    self._position_enu,
+                    self._px4_position_enu,
+                )
+
             def _safe_filtered_command(self):
                 """Clamp, smooth, and project game commands before PX4 receives them."""
                 max_h = self._max_speed_h
                 max_v = self._max_speed_z
+                control_pos = self._control_position()
                 if self._terminal_stop:
                     vx, vy, vz = self._smooth_command(0.0, 0.0, 0.0)
                     return vx, vy, vz
@@ -329,35 +363,36 @@ def main(args=None):
                 if not all(math.isfinite(v) for v in (vx, vy, vz)):
                     vx, vy, vz = 0.0, 0.0, 0.0
                 vx, vy = _clamp_horizontal_speed(vx, vy, max_h)
-                vx, vy, vz = self._apply_geofence_projection(vx, vy, vz)
-                vx, vy = self._apply_obstacle_projection(vx, vy)
+                vx, vy, vz = self._apply_geofence_projection(vx, vy, vz, control_pos)
+                vx, vy = self._apply_obstacle_projection(vx, vy, control_pos)
                 vx, vy = _clamp_horizontal_speed(vx, vy, max_h)
                 vz = _clamp(vz, -max_v, max_v)
                 vx, vy, vz = self._smooth_command(vx, vy, vz)
-                vz = self._altitude_hold_command(vz)
+                vz = self._altitude_hold_command(vz, control_pos)
                 if (
                     self._altitude_hold_enabled
-                    and self._position_enu is not None
-                    and self._position_enu[2] < self._target_altitude - 0.75
+                    and control_pos is not None
+                    and control_pos[2] < self._target_altitude - 0.75
                 ):
                     vx, vy = 0.0, 0.0
-                vx, vy, vz = self._apply_geofence_projection(vx, vy, vz)
-                vx, vy = self._apply_obstacle_projection(vx, vy)
+                vx, vy, vz = self._apply_geofence_projection(vx, vy, vz, control_pos)
+                vx, vy = self._apply_obstacle_projection(vx, vy, control_pos)
                 vx, vy = _clamp_horizontal_speed(vx, vy, max_h)
                 return vx, vy, _clamp(vz, -max_v, max_v)
 
-            def _altitude_hold_command(self, requested_vz):
+            def _altitude_hold_command(self, requested_vz, position=None):
                 """Keep SITL vehicles near their spawn altitude to avoid vertical runaway."""
                 if not self._altitude_hold_enabled:
                     return requested_vz
-                if self._position_enu is None:
+                position = self._control_position() if position is None else position
+                if position is None:
                     return requested_vz
                 target_z = _clamp(
                     self._target_altitude,
                     self._room_min[2] + 1.0,
                     self._room_max[2] - 1.0,
                 )
-                error = target_z - self._position_enu[2]
+                error = target_z - position[2]
                 hold_vz = _clamp(
                     self._altitude_hold_gain * error,
                     -self._max_speed_z,
@@ -395,12 +430,13 @@ def main(args=None):
                 )
                 return tuple(self._filtered_cmd)
 
-            def _apply_geofence_projection(self, vx, vy, vz):
-                if self._position_enu is None:
+            def _apply_geofence_projection(self, vx, vy, vz, position=None):
+                position = self._control_position() if position is None else position
+                if position is None:
                     return vx, vy, vz
                 cmd = [vx, vy, vz]
                 for i in range(3):
-                    p = self._position_enu[i]
+                    p = position[i]
                     lo = self._room_min[i]
                     hi = self._room_max[i]
                     margin = self._safety_margin
@@ -426,10 +462,11 @@ def main(args=None):
                         cmd[i] = min(cmd[i], -0.5)
                 return cmd[0], cmd[1], cmd[2]
 
-            def _apply_obstacle_projection(self, vx, vy):
-                if self._position_enu is None:
+            def _apply_obstacle_projection(self, vx, vy, position=None):
+                position = self._control_position() if position is None else position
+                if position is None:
                     return vx, vy
-                x, y = self._position_enu[0], self._position_enu[1]
+                x, y = position[0], position[1]
                 obs = self._obstacle
                 margin = self._obstacle_margin
                 px = x + vx * self._safety_lookahead
