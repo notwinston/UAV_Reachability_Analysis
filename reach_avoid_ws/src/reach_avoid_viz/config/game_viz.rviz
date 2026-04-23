@@ -17,15 +17,47 @@ Visualization Manager:
         Value: /game/markers
         Depth: 10
         Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Pose
+      Name: Defender Pose
+      Enabled: true
+      Alpha: 1
+      Arrow Length: 1
+      Arrow Radius: 0.08
+      Axes Length: 0.8
+      Axes Radius: 0.05
+      Color: 40; 120; 255
+      Shaft Length: 0.7
+      Shaft Radius: 0.05
+      Shape: Axes
+      Topic:
+        Value: /defender/state
+        Depth: 10
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Pose
+      Name: Attacker Pose
+      Enabled: true
+      Alpha: 1
+      Arrow Length: 1
+      Arrow Radius: 0.08
+      Axes Length: 0.8
+      Axes Radius: 0.05
+      Color: 255; 80; 80
+      Shaft Length: 0.7
+      Shaft Radius: 0.05
+      Shape: Axes
+      Topic:
+        Value: /attacker/state
+        Depth: 10
+        Reliability Policy: Reliable
   Global Options:
     Fixed Frame: world
     Frame Rate: 30
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 20
+      Distance: 42
       Focal Point:
-        X: 4
-        Y: 4
-        Z: 2
+        X: 22.5
+        Y: 12.5
+        Z: 8
       Name: Current View

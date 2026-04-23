@@ -83,6 +83,18 @@ def generate_launch_description():
         description='Initial Gazebo pose for the attacker as x,y,z',
     )
 
+    capture_distance_horizontal_arg = DeclareLaunchArgument(
+        'capture_distance_horizontal',
+        default_value='-1.0',
+        description='Override horizontal capture distance; negative keeps VF/config default',
+    )
+
+    capture_distance_vertical_arg = DeclareLaunchArgument(
+        'capture_distance_vertical',
+        default_value='-1.0',
+        description='Override vertical capture distance; negative keeps VF/config default',
+    )
+
     # Include simulation.launch.py
     simulation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -131,6 +143,8 @@ def generate_launch_description():
             'command_filter_alpha': 0.35,
             'max_accel_horizontal': 12.0,
             'max_accel_vertical': 8.0,
+            'capture_distance_horizontal': LaunchConfiguration('capture_distance_horizontal'),
+            'capture_distance_vertical': LaunchConfiguration('capture_distance_vertical'),
         }],
         additional_env=defender_env,
         output='screen',
@@ -146,6 +160,8 @@ def generate_launch_description():
         name='game_viz',
         parameters=[{
             'game_params_file': LaunchConfiguration('game_params_file'),
+            'capture_distance_horizontal': LaunchConfiguration('capture_distance_horizontal'),
+            'capture_distance_vertical': LaunchConfiguration('capture_distance_vertical'),
         }],
         output='screen',
     )
@@ -159,6 +175,8 @@ def generate_launch_description():
             'output_dir': '/workspaces/UAV_Reachability_Analysis/data/plots/gazebo_runs',
             'sample_stride': 2,
             'autosave_period_sec': 10.0,
+            'capture_distance_horizontal': LaunchConfiguration('capture_distance_horizontal'),
+            'capture_distance_vertical': LaunchConfiguration('capture_distance_vertical'),
         }],
         output='screen',
     )
@@ -182,6 +200,8 @@ def generate_launch_description():
         px4_dir_arg,
         defender_pose_arg,
         attacker_pose_arg,
+        capture_distance_horizontal_arg,
+        capture_distance_vertical_arg,
         simulation_launch,
         static_tf,
         delayed_defender,

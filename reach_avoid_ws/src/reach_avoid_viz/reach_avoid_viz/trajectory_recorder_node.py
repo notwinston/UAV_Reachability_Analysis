@@ -85,6 +85,8 @@ def main(args=None):
                 self.declare_parameter("output_name", "")
                 self.declare_parameter("sample_stride", 1)
                 self.declare_parameter("autosave_period_sec", 10.0)
+                self.declare_parameter("capture_distance_horizontal", -1.0)
+                self.declare_parameter("capture_distance_vertical", -1.0)
 
                 self._game_params_file = self.get_parameter("game_params_file").value
                 self._output_dir = Path(self.get_parameter("output_dir").value)
@@ -112,6 +114,12 @@ def main(args=None):
                 capture = gp.get("capture", {})
                 self._d_h = float(capture.get("d_h", DEFAULT_D_H))
                 self._d_z = float(capture.get("d_z", DEFAULT_D_Z))
+                capture_d_h = float(self.get_parameter("capture_distance_horizontal").value)
+                capture_d_z = float(self.get_parameter("capture_distance_vertical").value)
+                if capture_d_h > 0.0:
+                    self._d_h = capture_d_h
+                if capture_d_z > 0.0:
+                    self._d_z = capture_d_z
                 self._obstacles = [
                     _ensure_obstacle_height(obs, self._room.get("z_max", 20.0))
                     for obs in gp.get("obstacles", DEFAULT_OBSTACLES)

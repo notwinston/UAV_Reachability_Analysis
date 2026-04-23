@@ -48,6 +48,8 @@ class DefenderControlLogic:
         margin_h_factor: float = 0.3,
         gradient_deadband: float = 1e-6,
         min_hj_closure_fraction: float = 0.85,
+        capture_distance_horizontal: float | None = None,
+        capture_distance_vertical: float | None = None,
     ):
         self.loader = loader
         self.pid_gain_z = pid_gain_z
@@ -71,6 +73,8 @@ class DefenderControlLogic:
         self.k_y = h_params.get("k_y", 0.7)
         self.U_D_h = h_params.get("U_D_h", 6.0)
         self.U_A_h = h_params.get("U_A_h", 3.0)
+        self.capture_d_h = float(capture_distance_horizontal) if capture_distance_horizontal is not None else float(self.d_h)
+        self.capture_d_z = float(capture_distance_vertical) if capture_distance_vertical is not None else float(self.d_z)
 
         self.b_z_valid = self._valid_invariant_mask("B_z", "d_z_effective", self.d_z)
 
@@ -554,7 +558,7 @@ class DefenderControlLogic:
         status["z_dist"] = z_dist
 
         # Captured?
-        captured = h_dist <= self.d_h and z_dist <= self.d_z
+        captured = h_dist <= self.capture_d_h and z_dist <= self.capture_d_z
         status["captured"] = captured
 
         if captured:
@@ -609,6 +613,8 @@ def main(args=None):
                 self.declare_parameter("command_filter_alpha", 0.35)
                 self.declare_parameter("max_accel_horizontal", 2.0)
                 self.declare_parameter("max_accel_vertical", 1.5)
+                self.declare_parameter("capture_distance_horizontal", -1.0)
+                self.declare_parameter("capture_distance_vertical", -1.0)
 
                 vf_dir = self.get_parameter("value_function_dir").value
                 rate = self.get_parameter("control_rate").value
@@ -621,6 +627,8 @@ def main(args=None):
                 self._filter_alpha = float(self.get_parameter("command_filter_alpha").value)
                 self._max_accel_h = float(self.get_parameter("max_accel_horizontal").value)
                 self._max_accel_z = float(self.get_parameter("max_accel_vertical").value)
+                capture_d_h = float(self.get_parameter("capture_distance_horizontal").value)
+                capture_d_z = float(self.get_parameter("capture_distance_vertical").value)
 
                 # Load value functions
                 self._logic = None
@@ -635,10 +643,17 @@ def main(args=None):
                             margin_h_factor=margin_h,
                             gradient_deadband=gradient_deadband,
                             min_hj_closure_fraction=min_hj_closure_fraction,
+                            capture_distance_horizontal=(capture_d_h if capture_d_h > 0.0 else None),
+                            capture_distance_vertical=(capture_d_z if capture_d_z > 0.0 else None),
                         )
                         self.get_logger().info(
                             f"Value functions loaded from {vf_dir}: {loader.loaded_names}"
                         )
+                        if capture_d_h > 0.0 or capture_d_z > 0.0:
+                            self.get_logger().info(
+                                "Capture overrides enabled: "
+                                f"d_h={self._logic.capture_d_h:.3f}, d_z={self._logic.capture_d_z:.3f}"
+                            )
                     else:
                         self.get_logger().error(
                             f"Not all value functions loaded. Have: {loader.loaded_names}"
