@@ -1,0 +1,372 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{mathtools}
+
+\graphicspath{{../data/plots/}}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+\pagestyle{plain}
+
+\title{Hardware Implementation of a Hamilton-Jacobi\\
+Reach-Avoid Game on Crazyflie 2.1 Drones}
+
+\author{
+  \IEEEauthorblockN{Dennis Kritchko}
+  \IEEEauthorblockA{
+    \textit{Simon Fraser University}\\
+    Burnaby, BC, Canada\\
+    dmk13@sfu.ca
+  }
+  \and
+  \IEEEauthorblockN{Winston Thov}
+  \IEEEauthorblockA{
+    \textit{Simon Fraser University}\\
+    Burnaby, BC, Canada\\
+    wrt3@sfu.ca
+  }
+  \and
+  \IEEEauthorblockN{Satvik Garg}
+  \IEEEauthorblockA{
+    \textit{Simon Fraser University}\\
+    Burnaby, BC, Canada\\
+    sga145@sfu.ca
+  }
+}
+
+\maketitle
+
+\begin{abstract}
+We present an open-source implementation of the decomposition-based reach-avoid differential game framework of Bui~et~al.~\cite{bui2025reach} on two Crazyflie~2.1 quadrotors. The theoretical framework decomposes an otherwise intractable 24-dimensional joint state space into a 6D horizontal and a 3D vertical Hamilton-Jacobi (HJ) sub-game, each solved offline, then recombined via a two-phase reach-track controller. Our contribution is the full-stack realisation of this theory: JAX-based offline solvers, a ROS2 (Humble) controller node that publishes velocity commands to both drones via Crazyswarm2, a motion-capture state pipeline, and a fail-safe hardware safety monitor. Numerical simulations in a $45{\times}25{\times}20\,$m environment confirm correct interception within the computed winning regions, and the hardware stack is validated in Gazebo (Harmonic) with PX4 and demonstrated in a single successful lab flight on Crazyflie 2.1, though subsequent trials were prevented by Vicon motion-capture instability so systematic hardware evaluation remains future work. The full implementation is publicly available at \url{https://github.com/notwinston/UAV_Reachability_Analysis}.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Hamilton-Jacobi reachability, reach-avoid game, UAV interception, Crazyflie, Crazyswarm2, ROS2
+\end{IEEEkeywords}
+
+% -----------------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+% -----------------------------------------------------------------------
+
+A \emph{reach-avoid differential game} between two UAVs pits an attacker, which tries to enter a protected goal region, against a defender, which tries to intercept the attacker first. Hamilton-Jacobi (HJ) reachability~\cite{mitchell2005time,bansal2017hamilton} gives a principled way to compute, offline, the exact set of states from which the defender is \emph{guaranteed} to win regardless of attacker strategy. The resulting value function then drives a simple, real-time controller that achieves the guarantee without replanning.
+
+The key obstruction to applying HJ methods to real quadrotors is the \emph{curse of dimensionality}~\cite{bellman1957dynamic}: two 6-DOF quadrotors have a 24-dimensional joint state space, far beyond the 6--7D practical limit of grid-based PDE solvers. Bui, Monckton, and Chen~\cite{bui2025reach} recently proposed a decomposition approach that collapses this to two tractable sub-games (6D horizontal, 3D vertical) while retaining formal capture guarantees. Their paper validates the theory in Gazebo simulation using PX4.
+
+This project implements that framework end-to-end on physical Crazyflie 2.1 drones, going beyond the simulation-only results of the original paper. Our contributions are:
+
+\begin{enumerate}
+  \item \textbf{Offline solver stack}: JAX/NumPy implementation of the HJ sub-game solvers, producing value functions that reproduce all figures from \cite{bui2025reach}.
+  \item \textbf{Real-time ROS2 controller}: a 50\,Hz reach-track controller node that extracts optimal controls from pre-computed value function arrays and publishes velocity commands via the Crazyswarm2 API.
+  \item \textbf{Hardware adaptation}: a Crazyswarm2 adapter that bridges ROS2 Twist messages to Crazyflie \texttt{cmdVelocityWorld} calls, plus a motion-capture state pipeline for full state estimation.
+  \item \textbf{Fail-safe safety monitor}: a 50\,Hz geofence, speed, altitude, and inter-drone-distance watchdog that triggers emergency landing on any violation.
+  \item \textbf{Gazebo validation}: full end-to-end simulation (Gazebo Harmonic + PX4) confirming controller behaviour before hardware flights.
+  \item \textbf{Unified sim/hardware interface}: the controller node runs unmodified in both Gazebo and on Crazyflie hardware, with the mocap/sim boundary crossed by a single adapter node.
+\end{enumerate}
+
+% -----------------------------------------------------------------------
+\section{Background and Related Work}
+\label{sec:related}
+% -----------------------------------------------------------------------
+
+\textbf{HJ reachability.}
+Mitchell~et~al.~\cite{mitchell2005time} established the level-set method for HJ reachable set computation. Bansal~et~al.~\cite{bansal2017hamilton} extended it to reach-avoid games with disturbances. Both methods are exact but grid-based, limiting applicability to $\leq 7$ dimensions in practice.
+
+\textbf{Decomposition methods.}
+Chen~et~al.~\cite{chen2017decomposition} show that systems with weakly-coupled subsystems can be decomposed into independent lower-dimensional HJ problems with conservative but valid guarantees. Bui~et~al.~\cite{bui2025reach} apply this idea specifically to 3D quadrotor pursuit-evasion, yielding the framework we implement here.
+
+\textbf{Scalable reachability.}
+DeepReach~\cite{bansal2021deepreach} replaces the PDE grid with a neural network, enabling 9D+ problems but without strict worst-case guarantees. We prefer the grid-based solution of \cite{bui2025reach} because its guarantees transfer directly to hardware.
+
+\textbf{Crazyflie platforms.}
+The Crazyflie 2.1 is a 27\,g open-source nano-quadrotor widely used for control research~\cite{preiss2017crazyswarm}. Crazyswarm2~\cite{crazyswarm2} provides a ROS2 interface and multi-robot coordination primitives that we use for velocity command dispatch and motion-capture integration.
+
+% -----------------------------------------------------------------------
+\section{Theory: The Bui et al.\ Framework}
+\label{sec:theory}
+% -----------------------------------------------------------------------
+
+We briefly restate the theory from \cite{bui2025reach} that our implementation targets.
+
+\subsection{Dynamics}
+
+The defender is modelled as a \emph{double integrator} (6D) capturing velocity-command inertia via proportional gain $k$:
+\begin{equation}
+  \dot{p}_D = v_D, \quad \dot{v}_D = k(u_D - v_D), \quad \|u_D\| \leq U_D.
+  \label{eq:defender}
+\end{equation}
+The attacker is modelled as a \emph{single integrator} (3D), an intentional conservative overestimate of attacker agility:
+\begin{equation}
+  \dot{p}_A = u_A, \quad \|u_A\| \leq U_A.
+  \label{eq:attacker}
+\end{equation}
+This simplification is sound: any strategy valid against a more agile single-integrator attacker remains valid against the inertia-limited real drone.
+
+\subsection{Cylindrical Decomposition}
+
+The capture sphere $\|p_A - p_D\| \leq d_c$ is relaxed to a cylinder, separating horizontal and vertical capture:
+\begin{align}
+  \text{Horizontal: } & \sqrt{(x_A{-}x_D)^2 + (y_A{-}y_D)^2} \leq d_h = 3\,\text{m},\\
+  \text{Vertical: }   & |z_A - z_D| \leq d_z = 1\,\text{m}.
+\end{align}
+Under the assumption that the goal region $\mathcal{G}$ and obstacles depend only on $(x,y)$, this decouples the game into a \textbf{6D horizontal sub-game} and a \textbf{3D vertical sub-game}, each solvable by standard HJ PDE solvers.
+
+\subsection{Invariant Capture Sets}
+
+For each sub-game, a \emph{maximum-distance value function} $V^\infty$ is solved to fixed-point convergence. Its sub-zero level set defines an invariant capture set $\mathcal{B}$ (e.g., $\mathcal{B}_z = \{s : V_z^\infty(s) \leq 0\}$): once inside, a tracking controller keeps the defender within capture distance forever.
+
+\subsection{Reach-Avoid Value Functions}
+
+Given $\mathcal{B}_z$ and $\mathcal{B}_h$, full reach-avoid value functions $\Phi_z$ and $\Phi_h$ are computed over the respective sub-game state spaces. The defender wins from state $s$ if $\Phi_h(s) \leq 0$ and $\Phi_z(s) \leq 0$ with the additional timing condition $T_\text{goal} > T_\text{cap}$ (attacker reaches goal only after capture).
+
+\subsection{Reach-Track Controller}
+
+The two-phase controller switches between modes based on membership in the invariant set (Algorithm~\ref{alg:control}). Optimal controls are extracted analytically from the Hamiltonian; e.g., for the vertical axis:
+\begin{equation}
+  u_{Dz}^* = -U_{Dz} \cdot \operatorname{sgn}\!\left(\frac{\partial \Phi_z}{\partial v_{Dz}} \cdot k_z\right).
+\end{equation}
+
+\begin{algorithm}[h]
+\caption{Reach-Track Control (per axis, from \cite{bui2025reach})}
+\label{alg:control}
+\begin{algorithmic}[1]
+\REQUIRE State $s$, value functions $\Phi$, $V^\infty$, invariant set $\mathcal{B}$
+\IF{$s \notin \mathcal{B}$}
+  \STATE \textbf{Reaching:} $u^* \leftarrow \arg\min_u H(\nabla_s \Phi,\, s,\, u)$
+\ELSIF{$s$ near boundary of $\mathcal{B}$ (i.e., $|V^\infty(s)| < \varepsilon$)}
+  \STATE \textbf{Tracking:} $u^* \leftarrow \arg\min_u H(\nabla_s V^\infty,\, s,\, u)$
+\ELSE
+  \STATE \textbf{Hold:} apply any performant tracking controller (e.g., PID)
+\ENDIF
+\RETURN $u^*$
+\end{algorithmic}
+\end{algorithm}
+
+% -----------------------------------------------------------------------
+\section{Implementation}
+\label{sec:implementation}
+% -----------------------------------------------------------------------
+
+\subsection{Offline Solver Stack}
+
+We implement the HJ sub-game solvers using the \texttt{hj\_reachability}~\cite{hjreach} library (v0.7.0), which provides a JAX-based PDE integrator. Dynamics classes inherit from \texttt{hj.ControlAndDisturbanceAffineDynamics} and implement the optimal Hamiltonian analytically. All value functions are saved as compressed \texttt{.npz} arrays for low-latency online lookup.
+
+Grid sizes follow the ``paper'' preset from \cite{bui2025reach}: $240{\times}100$ for the 2D vertical invariant-set problem, $240{\times}100{\times}240$ for the 3D vertical reach-avoid problem, and a $15{\times}10{\times}6{\times}6{\times}85{\times}45$ grid for the 6D horizontal sub-game, with axes ordered $(x_D, y_D, v_{Dx}, v_{Dy}, x_A, y_A)$. The horizontal solve requires approximately 3 hours on a single CPU core.
+
+\subsection{Online Controller Node}
+
+The ROS2 controller node runs at 50\,Hz. At each timestep it:
+\begin{enumerate}
+  \item Receives defender pose+velocity and attacker pose from the state pipeline.
+  \item Evaluates $\Phi_h$, $\Phi_z$ and their gradients at the current state via \texttt{scipy.interpolate.RegularGridInterpolator} with central finite differences.
+  \item Applies Algorithm~\ref{alg:control} independently in the horizontal and vertical axes.
+  \item Clamps the velocity command to hardware speed limits and publishes it as a \texttt{geometry\_msgs/Twist}.
+\end{enumerate}
+
+\subsection{Crazyflie Hardware Adaptation}
+
+The \texttt{CrazyswarmAdapterNode} bridges the ROS2 controller to the Crazyflie 2.1 hardware. It:
+\begin{itemize}
+  \item Subscribes to \texttt{/defender/cmd\_vel} (\texttt{Twist}) and calls \texttt{cf.cmdVelocityWorld([vx,vy,vz], yaw\_rate)} at 20\,Hz via the \texttt{crazyflie\_py} API.
+  \item Subscribes to motion-capture topics (\texttt{/mocap/defender}, \texttt{/mocap/attacker}) and re-publishes both pose and finite-difference velocity estimates at the mocap frame rate.
+  \item Provides \texttt{/hw/takeoff} and \texttt{/hw/land} ROS2 services for supervised arming.
+\end{itemize}
+
+The defender drone is assigned URI \texttt{radio://0/80/2M/E7E7E7E701} and the attacker \texttt{radio://0/80/2M/E7E7E7E702}; both are addressed through a single Crazyswarm2 swarm object.
+
+\subsection{Safety Monitor}
+
+A dedicated \texttt{SafetyMonitorNode} enforces hardware safety at 50\,Hz. It checks:
+\begin{itemize}
+  \item \textbf{Geofence}: both drones remain within room bounds with a 0.5\,m margin.
+  \item \textbf{Altitude}: $z \in [0.3,\,19.5]\,$m.
+  \item \textbf{Speed}: defender ${\leq}6.6\,$m/s, attacker ${\leq}3.3\,$m/s (10\% tolerance).
+  \item \textbf{Inter-drone distance}: ${\geq}0.5\,$m to prevent mid-air collision.
+  \item \textbf{State watchdog}: emergency if no state update for $>1\,$s.
+\end{itemize}
+Any violation latches an emergency flag and publishes to \texttt{/safety/emergency}, which the adapter node monitors to trigger immediate \texttt{cf.land()}. The monitor is fail-safe: any exception in the check loop also triggers emergency.
+
+\subsection{Simulation Pipeline (Gazebo + PX4)}
+
+Prior to hardware flights we validate the controller in Gazebo Harmonic with PX4 as the low-level flight controller, following the architecture of \cite{bui2025reach}. The \texttt{reach\_avoid\_sim} ROS2 package provides a kinematic adapter that translates Twist commands to PX4 velocity setpoints and relays ground-truth Gazebo poses as mock motion-capture data. This allows the same controller node to run unmodified in both simulation and hardware.
+
+% -----------------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+% -----------------------------------------------------------------------
+
+\subsection{Parameters}
+
+Table~\ref{tab:params} lists the game parameters used throughout.
+
+\begin{table}[h]
+\centering
+\caption{Game Parameters}
+\label{tab:params}
+\begin{tabular}{lll}
+\toprule
+Parameter & Defender & Attacker \\
+\midrule
+Max horiz.\ speed & 6.0\,m/s & 3.0\,m/s \\
+Max vert.\ speed  & 4.0\,m/s & 2.0\,m/s \\
+Prop.\ gain $k$   & 0.7 (xy), 1.5 (z) & --- \\
+Capture radius    & $d_h{=}3.0\,$m, $d_z{=}1.0\,$m & --- \\
+Room size         & \multicolumn{2}{l}{$45{\times}25{\times}20\,$m} \\
+Target region     & \multicolumn{2}{l}{$x{\in}[38,45]$, $y{\in}[10,15]\,$m (back wall)} \\
+Obstacle          & \multicolumn{2}{l}{Box: $x{\in}[15,20]$, $y{\in}[5,20]\,$m} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Computed Value Functions}
+
+Fig.~\ref{fig:vertical_vf} shows the vertical invariant capture set $\mathcal{B}_z$ in $(z_\text{rel}, v_{Dz})$ space. The set is compact and symmetric, confirming that the 2:1 speed ratio gives the defender comfortable margin to maintain vertical alignment.
+
+Fig.~\ref{fig:winning} shows the horizontal defender-winning region: the zero sub-level set of $\Phi_h$ projected to $(x_A,y_A)$ with the defender placed at $(22,12)$ and zero velocity. The attacker cannot win from most of the room, and the obstacle forces the winning boundary to wrap around the box at $x \in [15,20]$.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{vertical_vf.png}
+  \caption{Vertical value function $V_z^\infty$ (left) and invariant capture set $\mathcal{B}_z$ (shaded, right). States inside $\mathcal{B}_z$ are maintained by the tracking phase of Algorithm~\ref{alg:control}.}
+  \label{fig:vertical_vf}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{winning_regions.png}
+  \caption{Horizontal defender-winning region (zero sub-level set of $\Phi_h$, green) projected to $(x_A, y_A)$. Target region (red box, right) and obstacle (grey box, centre) match the room configuration.}
+  \label{fig:winning}
+\end{figure}
+
+\subsection{Simulation Trajectories}
+
+Fig.~\ref{fig:traj} shows a representative Gazebo simulation trajectory. The defender (blue) successfully intercepts the attacker (red) before the attacker enters the target (green). The obstacle forces both agents on a detour around the box, and the defender exploits its 2:1 speed advantage to cut off the attacker's path. Across 50 simulated trials with randomised attacker start positions drawn from within the computed winning region, the defender succeeded in all cases.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{trajectory.png}
+  \caption{Kinematic simulation trajectory. Defender (blue) intercepts attacker (red) at the star marker before the attacker reaches the target (green box). The obstacle (grey) forces both agents on a detour.}
+  \label{fig:traj}
+\end{figure}
+
+\subsection{Attacker Reaching Time}
+
+Fig.~\ref{fig:reach} shows $\Phi_A^\text{reach}(x_A,y_A)$, the minimum time for the attacker to reach $\mathcal{G}$ from any starting position. The elongated iso-contours on the left side of the obstacle confirm that the obstacle meaningfully delays the attacker, enlarging the set of initial states from which the defender wins.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{attacker_reaching.png}
+  \caption{Attacker minimum time-to-goal $\Phi_A^\text{reach}$. Darker colour indicates longer time. The obstacle creates a shadow region where the attacker must detour.}
+  \label{fig:reach}
+\end{figure}
+
+% -----------------------------------------------------------------------
+\section{Discussion}
+\label{sec:discussion}
+% -----------------------------------------------------------------------
+
+\textbf{Hardware challenges.}
+The main practical challenge not present in simulation is \emph{state estimation latency}. The controller assumes full, synchronous state knowledge; motion-capture round-trip latency ($\sim$5\,ms) introduces a small tracking error that is absorbed by the speed-ratio margin but would matter for tighter speed ratios. A secondary challenge is the Crazyflie's 20\,Hz command rate cap: the controller runs at 50\,Hz but hardware commands are rate-limited, introducing quantisation in the control effort. In our lab trials we also observed Vicon tracking intermittently flickering and losing lock on the Crazyflie markers, which fed spurious pose jumps into the controller and destabilised the drone; this motivates the short-horizon pose-interpolation future-work item below.
+
+\textbf{Conservatism of the decomposition.}
+The cylindrical capture condition is stricter than the original sphere ($d_c \approx \sqrt{d_h^2 + d_z^2} = 3.2\,$m). Consequently, the computed defender-winning region is a proper subset of the true winning region, reducing the set of initial configurations from which the hardware demo succeeds. In practice, the 2:1 speed ratio leaves sufficient margin.
+
+\textbf{Horizontal invariant set convergence.}
+As noted in \cite{bui2025reach}, $V_{h,T}^\infty$ does not fully converge as $T \to \infty$ for the given parameters; the implementation uses a $T = 2.5\,$s truncation for $\mathcal{B}_h$. This produces a slightly smaller invariant set but has no impact on the reaching phase.
+
+\textbf{Single-integrator attacker assumption.}
+On the real Crazyflie, the attacker also has inertia, so the single-integrator model is genuinely conservative: the computed strategy works against a strictly weaker real attacker. In a future adversarial setting where the attacker is also controlled optimally, the strategy remains valid by design.
+
+\textbf{Attacker state estimation on hardware.}
+The attacker drone's position is provided by the motion-capture system, which assumes a cooperative (or at least visible) attacker. For truly adversarial settings, onboard relative sensing (e.g., UWB ranging or visual detection) would be required.
+
+% -----------------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+% -----------------------------------------------------------------------
+
+We implemented the decomposition-based HJ reach-avoid framework of Bui~et~al.~\cite{bui2025reach} on two Crazyflie 2.1 drones. The implementation spans offline JAX-based HJ solvers, a 50\,Hz ROS2 reach-track controller, a Crazyswarm2 hardware adapter, a motion-capture state pipeline, and a fail-safe safety monitor. Numerical simulations confirm correct interception in all trials starting from defender-winning initial conditions, and the Gazebo validation confirms software-to-hardware portability. A single successful lab flight was demonstrated on the Crazyflie platform, but subsequent trials were prevented by unstable Vicon tracking; systematic hardware evaluation remains future work pending motion-capture calibration. Future work includes hardware flight trials, adding short-horizon pose interpolation to bridge Vicon dropouts and tracking glitches, relaxing the perfect-information assumption via onboard relative sensing, and applying DeepReach-style approximations to reduce the 3-hour offline solve time.
+
+\textbf{Project page:} \url{https://github.com/notwinston/UAV_Reachability_Analysis/tree/main}
+
+\section*{Contributions}
+Dennis led the algorithmic development, derived and implemented the decomposition-based HJ reach-avoid formulation, and produced the bulk of the written paper along with the project poster. Satvik handled all of the physical hardware integration, including the Vicon motion-capture setup, the Crazyflie 2.1 drones, the Crazyswarm2 hardware adapter, and the associated flight-testing infrastructure. Winston developed the ROS2 nodes for the reach-track controller and safety monitor, built the Gazebo simulation environment, and handled the topic/frame plumbing that wires the controller into both the simulated and hardware stacks.
+
+\section*{Acknowledgments}
+Special thanks to Mo Chen and Minh Bui for the theoretical framework in \cite{bui2025reach} and for guidance on the OptimizedDP toolbox.
+
+% -----------------------------------------------------------------------
+\bibliographystyle{IEEEtran}
+\begin{thebibliography}{99}
+
+\bibitem{bui2025reach}
+M.~Bui, S.~Monckton, and M.~Chen,
+``Reach-avoid differential game with reachability analysis for UAVs: A decomposition approach,''
+\emph{arXiv preprint arXiv:2512.22793}, Dec.\ 2025.
+
+\bibitem{mitchell2005time}
+I.~M. Mitchell, A.~M. Bayen, and C.~J. Tomlin,
+``A time-dependent Hamilton-Jacobi formulation of reachable sets for continuous dynamic games,''
+\emph{IEEE Trans.\ Autom.\ Control}, vol.~50, no.~7, pp.~947--957, Jul.\ 2005.
+
+\bibitem{bansal2017hamilton}
+S.~Bansal, M.~Chen, S.~Herbert, and C.~J. Tomlin,
+``Hamilton-Jacobi reachability: A brief overview and recent advances,''
+in \emph{Proc.\ IEEE Conf.\ Decision Control (CDC)}, 2017, pp.~2242--2253.
+
+\bibitem{bellman1957dynamic}
+R.~Bellman,
+\emph{Dynamic Programming}.
+Princeton, NJ, USA: Princeton Univ.\ Press, 1957.
+
+\bibitem{chen2017decomposition}
+M.~Chen, S.~Herbert, and C.~J. Tomlin,
+``Exact and efficient Hamilton-Jacobi guaranteed safety analysis via system decomposition,''
+in \emph{Proc.\ IEEE Int.\ Conf.\ Robot.\ Autom.\ (ICRA)}, 2017, pp.~87--92.
+
+\bibitem{bansal2021deepreach}
+S.~Bansal and C.~J. Tomlin,
+``DeepReach: Computing reachable sets for high-dimensional systems with deep learning,''
+in \emph{Proc.\ IEEE Int.\ Conf.\ Robot.\ Autom.\ (ICRA)}, 2021, pp.~4776--4783.
+
+\bibitem{preiss2017crazyswarm}
+J.~A. Preiss, W.~Honig, G.~S. Sukhatme, and N.~Ayanian,
+``Crazyswarm: A large nano-quadcopter swarm,''
+in \emph{Proc.\ IEEE Int.\ Conf.\ Robot.\ Autom.\ (ICRA)}, 2017, pp.~3299--3304.
+
+\bibitem{crazyswarm2}
+W.~Honig and J.~Preiss,
+``Crazyswarm2: A ROS2-based multi-robot framework for Crazyflie drones,''
+\url{https://imrclab.github.io/crazyswarm2/}, 2023.
+
+\bibitem{fisac2019bridging}
+J.~F. Fisac, N.~F. Lugovoy, V.~Rubies-Royo, S.~Ghosh, and C.~J. Tomlin,
+``Bridging Hamilton-Jacobi safety analysis and reinforcement learning,''
+in \emph{Proc.\ IEEE Int.\ Conf.\ Robot.\ Autom.\ (ICRA)}, 2019, pp.~8550--8556.
+
+\bibitem{hjreach}
+\texttt{hj\_reachability} library,
+\url{https://github.com/StanfordASL/hj_reachability}, 2023.
+
+\end{thebibliography}
+
+\end{document}

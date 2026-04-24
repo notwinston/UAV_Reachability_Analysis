@@ -1,59 +1,111 @@
+# ============================================================================
+# Reach-Avoid Differential Game — Shared Parameters
+# ============================================================================
+# This file is the single source of truth for every tunable constant in the
+# paper re-implementation (Bui et al., "Reach-Avoid Differential Game with
+# Reachability Analysis for UAVs — A Decomposition Approach", arXiv 2512.22793).
+#
+# It is consumed by:
+#   - reach_avoid_game (offline HJ value-function computation)
+#   - reach_avoid_ws/reach_avoid_controller (online defender ROS2 node)
+#   - reach_avoid_ws/reach_avoid_sim (Gazebo arena geometry)
+#
+# Units are SI: metres, seconds, m/s, m/s^2 unless noted. All spatial axes use
+# the Gazebo world frame (x-east, y-north, z-up).
+#
+# Grid resolution is selected via `grid_preset` below. The defaults in `grid:`
+# are overwritten at load time from the matching entry under `grid_presets:`.
+# ============================================================================
+
+# --- Arena bounds (axis-aligned box, Gazebo world frame) -------------------
+# Must match the SDF world in reach_avoid_ws/src/reach_avoid_sim/worlds/.
+# The horizontal solver uses these as hard-wall SDFs in the defender avoid set.
 room:
   x_min: 0.0
-  x_max: 45.0
+  x_max: 45.0   # long axis (attacker ingress direction)
   y_min: 0.0
   y_max: 25.0
-  z_min: 0.0
-  z_max: 20.0
+  z_min: 0.0    # floor
+  z_max: 20.0   # ceiling
+
+# --- Defender drone (double integrator, paper §III.A) ----------------------
+# Modeled as a 6D double integrator: state = [x,y,z, vx,vy,vz], control = accel
+# command shaped by a first-order velocity tracker with gains k_x, k_y, k_z.
 defender:
-  max_speed_horizontal: 6.0
-  max_speed_vertical: 4.0
-  k_x: 0.7
-  k_y: 0.7
-  k_z: 1.5
+  max_speed_horizontal: 6.0   # |v_xy| bound (m/s). Must be >= attacker speed.
+  max_speed_vertical: 4.0     # |v_z|  bound (m/s)
+  k_x: 0.7                    # x-axis velocity tracker gain (1/s). Must match
+  k_y: 0.7                    # defender_node.py velocity loop so the offline
+  k_z: 1.5                    # model matches the runtime controller.
+
+# --- Attacker drone (single integrator, paper §III.A) ----------------------
+# Modeled as a 3D single integrator: position-only state, velocity commanded
+# instantaneously. Over-estimates agility to give a conservative guarantee.
 attacker:
-  max_speed_horizontal: 3.0
-  max_speed_vertical: 2.0
+  max_speed_horizontal: 3.0   # |v_xy| bound (m/s); must be < defender speed.
+  max_speed_vertical: 2.0     # |v_z|  bound (m/s)
+
+# --- Capture set (paper Eq. 7) ---------------------------------------------
+# Defender is said to have "captured" the attacker when the relative position
+# satisfies |dx|, |dy| <= d_h AND |dz| <= d_z.
 capture:
-  d_h: 3.0
-  d_z: 1.0
+  d_h: 3.0   # horizontal capture radius (m)
+  d_z: 1.0   # vertical capture half-height (m)
+
+# --- Target region the attacker is trying to reach (paper Eq. 8) -----------
 target_region:
   type: box
   x_min: 38.0
   x_max: 45.0
   y_min: 10.0
   y_max: 15.0
+
+# --- Static obstacles (axis-aligned boxes) ---------------------------------
+# Included in the defender avoid set by the horizontal solver.
 obstacles:
   - type: box
     x_min: 15.0
     x_max: 20.0
     y_min: 5.0
     y_max: 20.0
+
+# --- Grid resolution preset ------------------------------------------------
+# One of: `dev` (fast, for smoke tests), `medium` (mid-fidelity, ~2x dev),
+# `paper` (matches published figures; slow, high-memory).
 grid_preset: dev
+
+# --- Grid (active values; auto-populated from the selected preset) ---------
+# DO NOT hand-edit the numbers under `grid:` — they are overwritten at load
+# time from `grid_presets[<grid_preset>]`. Edit the presets below instead.
 grid:
-  vertical:
-    z_rel_points: 81
-    v_dz_points: 41
-    z_rel_range: [-10.0, 10.0]
-    v_dz_range: [-4.0, 4.0]
-  vertical_3d:
+  vertical:                   # 2D relative-vertical game (z_rel, v_dz)
+    z_rel_points: 81          # resolution along relative altitude
+    v_dz_points: 41           # resolution along defender vertical velocity
+    z_rel_range: [-10.0, 10.0]  # (m)
+    v_dz_range: [-4.0, 4.0]     # (m/s)
+  vertical_3d:                # 3D absolute-vertical game (z_D, v_dz, z_A)
     z_d_points: 41
     v_dz_points: 21
     z_a_points: 41
-  horizontal:
-    rel_pos_points: 21
-    rel_vel_points: 11
-    rel_pos_range: 6.0
-    game_x_points: 9
-    game_y_points: 7
-    game_vel_x_points: 5
-    game_vel_y_points: 5
-    reach_x_points: 21
-    reach_y_points: 13
+  horizontal:                 # 6D horizontal game + helper 4D/2D grids
+    rel_pos_points: 21        # 4D relative game: Δx, Δy resolution
+    rel_vel_points: 11        # 4D relative game: Δvx, Δvy resolution
+    rel_pos_range: 6.0        # half-width (m) of relative-position axes
+    game_x_points: 9          # 6D game grid: defender x resolution
+    game_y_points: 7          # 6D game grid: defender y resolution
+    game_vel_x_points: 5      # 6D game grid: defender vx resolution
+    game_vel_y_points: 5      # 6D game grid: defender vy resolution
+    reach_x_points: 21        # 2D attacker-reach grid: x resolution
+    reach_y_points: 13        # 2D attacker-reach grid: y resolution
   solver:
-    accuracy: medium
-    time_horizon: 15.0
-    time_steps: 100
+    accuracy: medium          # odp spatial derivative stencil: low|medium|high
+    time_horizon: 15.0        # backward-reach horizon (s)
+    time_steps: 100           # number of dt slices across the horizon
+
+# --- Grid presets ----------------------------------------------------------
+# `dev` keeps the 6D solve small enough to finish in minutes on a laptop.
+# `medium` doubles resolution (hour-scale, needs >= 16 GB RAM).
+# `paper` targets the figures in the published paper (multi-hour, HPC-scale).
 grid_presets:
   dev:
     vertical:

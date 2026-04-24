@@ -1,4 +1,6 @@
+# Advisor Notes — Raw
 
+> Raw advising notes from Prof. Mo Chen (SFU MARS Lab) preserved verbatim for project context. This is not maintained documentation; see `../../README.md`, `../ARCHITECTURE.md`, and `../../REPRODUCIBILITY.md` for the curated docs.
 
 But generally, the main structure of the project is illustrated in Fig 13 of the paper. 
 There 2 main parts: computing the value function of the game (independent of Gazebo and ROS) and controlling the defender drone using the value function computed (which is a ROS node).  The ROS node would then just send velocity commands to low-level controller. For low-level control, I used PX4 as a low-level controller.  For Gazebo simulated drone, I would just recommend PX4.
