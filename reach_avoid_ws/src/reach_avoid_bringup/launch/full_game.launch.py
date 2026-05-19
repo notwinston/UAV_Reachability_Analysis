@@ -95,6 +95,18 @@ def generate_launch_description():
         description='Override vertical capture distance; negative keeps VF/config default',
     )
 
+    trajectory_output_dir_arg = DeclareLaunchArgument(
+        'trajectory_output_dir',
+        default_value='/workspaces/UAV_Reachability_Analysis/data/plots/gazebo_runs',
+        description='Directory where trajectory plots and sidecars will be saved',
+    )
+
+    trajectory_output_name_arg = DeclareLaunchArgument(
+        'trajectory_output_name',
+        default_value='',
+        description='Optional output filename for the trajectory plot PNG',
+    )
+
     # Include simulation.launch.py
     simulation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -172,7 +184,8 @@ def generate_launch_description():
         name='trajectory_recorder',
         parameters=[{
             'game_params_file': LaunchConfiguration('game_params_file'),
-            'output_dir': '/workspaces/UAV_Reachability_Analysis/data/plots/gazebo_runs',
+            'output_dir': LaunchConfiguration('trajectory_output_dir'),
+            'output_name': LaunchConfiguration('trajectory_output_name'),
             'sample_stride': 2,
             'autosave_period_sec': 10.0,
             'capture_distance_horizontal': LaunchConfiguration('capture_distance_horizontal'),
@@ -202,6 +215,8 @@ def generate_launch_description():
         attacker_pose_arg,
         capture_distance_horizontal_arg,
         capture_distance_vertical_arg,
+        trajectory_output_dir_arg,
+        trajectory_output_name_arg,
         simulation_launch,
         static_tf,
         delayed_defender,

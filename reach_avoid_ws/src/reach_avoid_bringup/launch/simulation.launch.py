@@ -163,6 +163,7 @@ def generate_launch_description():
         gazebo_env['QT_X11_NO_MITSHM'] = '1'  # avoids shared-memory X11 issues in containers
     else:
         gz_cmd.append('-s')  # headless server mode (no GUI)
+        gz_cmd.append('--headless-rendering')
     gz_cmd.append(LaunchConfiguration('world_file'))
 
     gazebo = ExecuteProcess(
